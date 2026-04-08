@@ -1,0 +1,40 @@
+strategies:
+  # ── 现货趋势策略 ──────────────────────────────────────────────────────
+  - name: btc_trend_spot
+    class: TrendStrategy
+    enabled: true
+    inst_type: SPOT
+    symbol: BTC-USDT
+    config:
+      timeframe: "5m"
+      ema_fast: 9
+      ema_slow: 21
+      macd_fast: 5         # 缩短适配5分钟线，响应更快
+      macd_slow: 13
+      macd_signal: 3
+      atr_period: 14
+      atr_sl_multiplier: 2.0
+      position_size_pct: 0.1
+      require_spread_expand: true  # 要求交叉时EMA间距正在扩大
+      cooldown_candles: 3          # 开/平仓后等 3 根K线（15分钟）
+
+  # ── 合约趋势策略 ──────────────────────────────────────────────────────
+  - name: eth_trend_swap
+    class: TrendStrategy
+    enabled: true
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "5m"
+      ema_fast: 9
+      ema_slow: 21
+      macd_fast: 5
+      macd_slow: 13
+      macd_signal: 3
+      atr_period: 14
+      atr_sl_multiplier: 2.5
+      leverage: 10
+      td_mode: cross
+      position_size_pct: 0.2
+      require_spread_expand: true
+      cooldown_candles: 3
