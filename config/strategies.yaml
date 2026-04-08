@@ -38,3 +38,139 @@ strategies:
       position_size_pct: 0.2
       require_spread_expand: true
       cooldown_candles: 3
+
+  # ── BB+RSI 均值回归（振荡行情）────────────────────────────────────────
+  - name: btc_bbrsi_spot
+    class: BbRsiStrategy
+    enabled: false
+    inst_type: SPOT
+    symbol: BTC-USDT
+    config:
+      timeframe: "15m"
+      bb_period: 20
+      bb_std: 2.0
+      rsi_period: 14
+      rsi_oversold: 30
+      rsi_overbought: 70
+      atr_period: 14
+      atr_sl_multiplier: 1.5
+      position_size_pct: 0.1
+      cooldown_candles: 3
+
+  - name: eth_bbrsi_swap
+    class: BbRsiStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "15m"
+      bb_period: 20
+      bb_std: 2.0
+      rsi_period: 14
+      rsi_oversold: 30
+      rsi_overbought: 70
+      atr_period: 14
+      atr_sl_multiplier: 1.5
+      leverage: 5
+      td_mode: cross
+      position_size_pct: 0.15
+      cooldown_candles: 3
+
+  # ── Donchian 通道突破（大趋势）────────────────────────────────────────
+  - name: btc_donchian_swap
+    class: DonchianStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: BTC-USDT-SWAP
+    config:
+      timeframe: "1H"
+      entry_period: 20       # 突破20周期新高/新低入场
+      exit_period: 10        # 跌破10周期低点/高点出场
+      atr_period: 14
+      atr_sl_multiplier: 2.0
+      leverage: 5
+      td_mode: cross
+      position_size_pct: 0.15
+      cooldown_candles: 2
+
+  - name: eth_donchian_swap
+    class: DonchianStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "1H"
+      entry_period: 20
+      exit_period: 10
+      atr_period: 14
+      atr_sl_multiplier: 2.0
+      leverage: 5
+      td_mode: cross
+      position_size_pct: 0.15
+      cooldown_candles: 2
+
+  # ── 网格策略（振荡区间）───────────────────────────────────────────────
+  - name: btc_grid_spot
+    class: GridStrategy
+    enabled: false
+    inst_type: SPOT
+    symbol: BTC-USDT
+    config:
+      timeframe: "5m"
+      grid_lower: 70000      # 网格下轨（需根据行情手动设定）
+      grid_upper: 90000      # 网格上轨
+      n_grids: 10            # 格数
+      grid_dual: false       # 现货单向做多
+      position_size_pct: 0.3 # 总仓位，每格 = 0.3/10 = 3%
+
+  - name: eth_grid_swap
+    class: GridStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "5m"
+      grid_lower: 1600
+      grid_upper: 2400
+      n_grids: 10
+      grid_dual: true        # 合约双向网格
+      leverage: 3
+      td_mode: cross
+      position_size_pct: 0.3
+
+  # ── VWAP 偏离回归（日内）─────────────────────────────────────────────
+  - name: btc_vwap_swap
+    class: VwapStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: BTC-USDT-SWAP
+    config:
+      timeframe: "5m"
+      vwap_std_mult: 1.5     # 入场阈值：VWAP ± 1.5σ
+      rsi_period: 14
+      rsi_oversold: 35
+      rsi_overbought: 65
+      atr_period: 14
+      atr_sl_multiplier: 1.5
+      leverage: 5
+      td_mode: cross
+      position_size_pct: 0.1
+      cooldown_candles: 3
+
+  - name: eth_vwap_swap
+    class: VwapStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "5m"
+      vwap_std_mult: 1.5
+      rsi_period: 14
+      rsi_oversold: 35
+      rsi_overbought: 65
+      atr_period: 14
+      atr_sl_multiplier: 1.5
+      leverage: 5
+      td_mode: cross
+      position_size_pct: 0.1
+      cooldown_candles: 3
