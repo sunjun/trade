@@ -171,7 +171,7 @@ class StrategyEngine:
 
     async def _on_order_update(self, orders: list[Order]):
         for order in orders:
-            self._portfolio.on_order_filled(order)
+            await self._portfolio.on_order_filled(order)
             # 路由给对应策略
             for strategy in self._strategies:
                 if order.strategy_name == strategy.name or order.inst_id == strategy.symbol:
