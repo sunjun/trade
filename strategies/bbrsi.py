@@ -9,7 +9,6 @@
 止损：入场价 ± ATR × multiplier
 适合行情：横盘震荡，布林带宽较窄
 """
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -18,6 +17,7 @@ from engine.base_strategy import BaseStrategy
 from gateway.models import (
     Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal,
 )
+from strategies._base_state import PositionState, build_close_signal
 from strategies._indicators import RunningATR, RunningBB, RunningRSI
 
 if TYPE_CHECKING:
@@ -25,26 +25,6 @@ if TYPE_CHECKING:
     from engine.risk_manager import RiskManager
     from gateway.okx_rest import OKXRestClient
     from storage.db import Database
-
-
-@dataclass
-class _State:
-    flat: bool = True
-    pos_side: PosSide = PosSide.NET
-    entry_price: float = 0.0
-    stop_loss: float = 0.0
-
-    def open(self, pos_side: PosSide, entry_price: float, stop_loss: float):
-        self.flat = False
-        self.pos_side = pos_side
-        self.entry_price = entry_price
-        self.stop_loss = stop_loss
-
-    def close(self):
-        self.flat = True
-        self.pos_side = PosSide.NET
-        self.entry_price = 0.0
-        self.stop_loss = 0.0
 
 
 class BbRsiStrategy(BaseStrategy):
@@ -76,7 +56,7 @@ class BbRsiStrategy(BaseStrategy):
         self._candles_since_trade: int = self._cooldown
 
         self.warm_up_period = max(bb_period * 3, rsi_period * 3, atr_period) + 5
-        self._state = _State()
+        self._state = PositionState()
         self._can_short = (inst_type == InstType.SWAP)
 
     async def on_candle(self, candle: Candle) -> list[Signal]:
@@ -181,21 +161,10 @@ class BbRsiStrategy(BaseStrategy):
         return signals
 
     def _build_close(self, price: float, reason: str) -> Signal | None:
-        if self._state.flat:
-            return None
-        if self._state.pos_side == PosSide.LONG:
-            side = OrderSide.SELL
-            pos_side = PosSide.LONG if self._can_short else PosSide.NET
-        else:
-            side = OrderSide.BUY
-            pos_side = PosSide.SHORT
-        pos = self._portfolio.get_position(self.symbol, self._state.pos_side.value)
-        qty = pos.size if pos else 0.0
-        if qty <= 0:
-            logger.warning(f"[{self.name}] Close signal but no position found, skip")
-            return None
-        return Signal(inst_id=self.symbol, side=side, order_type=OrderType.MARKET,
-                      qty=qty, pos_side=pos_side, reason=reason)
+        return build_close_signal(
+            self._state, self.symbol, self._portfolio,
+            self._can_short, reason, self.name,
+        )
 
     async def on_order_update(self, order: Order):
         if order.status == OrderStatus.FILLED:

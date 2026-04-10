@@ -40,14 +40,15 @@
   position_size_pct : 0.1
   cooldown_candles  : 2
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
 from engine.base_strategy import BaseStrategy
 from gateway.models import Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal
-from strategies._indicators import RunningATR, RunningEMA
+from strategies._base_state import PositionState, build_close_signal
+from strategies._indicators import RunningATR, RunningEMA, RunningMACD
 
 if TYPE_CHECKING:
     from engine.portfolio import Portfolio
@@ -56,30 +57,7 @@ if TYPE_CHECKING:
     from storage.db import Database
 
 
-# ── 指标 ──────────────────────────────────────────────────────────────────────
-
-class _MACD:
-    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
-        self._ef  = RunningEMA(fast)
-        self._es  = RunningEMA(slow)
-        self._sig = RunningEMA(signal)
-        self.hist: Optional[float] = None
-
-    def update(self, price: float) -> bool:
-        ef = self._ef.update(price)
-        es = self._es.update(price)
-        if ef is None or es is None:
-            return False
-        sig = self._sig.update(ef - es)
-        if sig is None:
-            return False
-        self.hist = (ef - es) - sig
-        return True
-
-    @property
-    def ready(self) -> bool:
-        return self.hist is not None
-
+# ── 成交量均线 ────────────────────────────────────────────────────────────────
 
 class _VolMA:
     """成交量简单移动平均（用 deque 保证 O(1)）"""
@@ -107,8 +85,8 @@ class _TfCtx:
     ema_fast : RunningEMA
     ema_slow : RunningEMA
     vol_ma   : _VolMA
-    macd     : Optional[_MACD] = None      # 4H/1H 有，15M 可不用
-    atr      : Optional[RunningATR] = None # 15M 用于止损
+    macd     : Optional[RunningMACD] = None  # 4H/1H 有，15M 可不用
+    atr      : Optional[RunningATR] = None   # 15M 用于止损
 
     # 上一根K线 EMA 值，用于检测交叉
     prev_ef  : Optional[float] = None
@@ -139,28 +117,6 @@ class _TfCtx:
         atr_ok  = (self.atr  is None or self.atr.ready)
         return (self.ema_fast.ready and self.ema_slow.ready
                 and self.vol_ma.ready and macd_ok and atr_ok)
-
-
-# ── 持仓状态机 ────────────────────────────────────────────────────────────────
-
-@dataclass
-class _State:
-    flat       : bool     = True
-    pos_side   : PosSide  = PosSide.NET
-    entry_price: float    = 0.0
-    stop_loss  : float    = 0.0
-
-    def open(self, side: PosSide, price: float, sl: float):
-        self.flat = False
-        self.pos_side = side
-        self.entry_price = price
-        self.stop_loss = sl
-
-    def close(self):
-        self.flat = True
-        self.pos_side = PosSide.NET
-        self.entry_price = 0.0
-        self.stop_loss = 0.0
 
 
 # ── 多时框趋势策略 ────────────────────────────────────────────────────────────
@@ -202,7 +158,7 @@ class MtfTrendStrategy(BaseStrategy):
             ema_fast = RunningEMA(h1f),
             ema_slow = RunningEMA(h1s),
             vol_ma   = _VolMA(config.get("h1_vol_period", 20)),
-            macd     = _MACD(
+            macd     = RunningMACD(
                 config.get("h1_macd_fast",   12),
                 config.get("h1_macd_slow",   26),
                 config.get("h1_macd_signal",  9),
@@ -232,7 +188,7 @@ class MtfTrendStrategy(BaseStrategy):
                                   config.get("m15_vol_period", 20)) + 10
 
         # ── 状态机 ────────────────────────────────────────────────────────────
-        self._state    = _State()
+        self._state    = PositionState()
         self._can_short = (inst_type == InstType.SWAP)
 
     # ── engine 识别的多时框配置 ───────────────────────────────────────────────
@@ -507,25 +463,7 @@ class MtfTrendStrategy(BaseStrategy):
     # ── 工具 ──────────────────────────────────────────────────────────────────
 
     def _close_signal(self, price: float, reason: str) -> Optional[Signal]:
-        if self._state.flat:
-            return None
-        if self._state.pos_side == PosSide.LONG:
-            side = OrderSide.SELL
-            pos_side = PosSide.LONG if self._can_short else PosSide.NET
-        else:
-            side = OrderSide.BUY
-            pos_side = PosSide.SHORT
-
-        pos = self._portfolio.get_position(self.symbol, self._state.pos_side.value)
-        qty = pos.size if pos else 0.0
-        if qty <= 0:
-            logger.warning(f"[{self.name}] Close signal but no position found, skip")
-            return None
-        return Signal(
-            inst_id=self.symbol,
-            side=side,
-            order_type=OrderType.MARKET,
-            qty=qty,
-            pos_side=pos_side,
-            reason=reason,
+        return build_close_signal(
+            self._state, self.symbol, self._portfolio,
+            self._can_short, reason, self.name,
         )

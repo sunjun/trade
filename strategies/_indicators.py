@@ -29,6 +29,34 @@ class RunningEMA:
         self._buf.clear()
 
 
+class RunningMACD:
+    """MACD = EMA(fast) - EMA(slow); Signal = EMA(signal) of MACD; Hist = MACD - Signal"""
+    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
+        self._ema_fast = RunningEMA(fast)
+        self._ema_slow = RunningEMA(slow)
+        self._ema_signal = RunningEMA(signal)
+        self.macd: float | None = None
+        self.signal_line: float | None = None
+        self.hist: float | None = None
+
+    def update(self, price: float) -> bool:
+        ef = self._ema_fast.update(price)
+        es = self._ema_slow.update(price)
+        if ef is None or es is None:
+            return False
+        self.macd = ef - es
+        sig = self._ema_signal.update(self.macd)
+        if sig is None:
+            return False
+        self.signal_line = sig
+        self.hist = self.macd - self.signal_line
+        return True
+
+    @property
+    def ready(self) -> bool:
+        return self.hist is not None
+
+
 class RunningATR:
     """真实波幅均值（EMA平滑）"""
     def __init__(self, period: int = 14):

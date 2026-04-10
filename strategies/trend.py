@@ -8,8 +8,6 @@
 
 止损：入场价 ± ATR * multiplier
 """
-from collections import deque
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -18,113 +16,14 @@ from engine.base_strategy import BaseStrategy
 from gateway.models import (
     Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal,
 )
+from strategies._base_state import PositionState, build_close_signal
+from strategies._indicators import RunningATR, RunningEMA, RunningMACD
 
 if TYPE_CHECKING:
     from engine.portfolio import Portfolio
     from engine.risk_manager import RiskManager
     from gateway.okx_rest import OKXRestClient
     from storage.db import Database
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 指标计算器（增量更新，无需重算历史）
-# ──────────────────────────────────────────────────────────────────────────────
-
-class _RunningEMA:
-    """指数移动平均，增量计算"""
-    def __init__(self, period: int):
-        self.period = period
-        self.k = 2.0 / (period + 1)
-        self.value: float | None = None
-        self._init_buf: list[float] = []
-
-    def update(self, price: float) -> float | None:
-        if self.value is None:
-            self._init_buf.append(price)
-            if len(self._init_buf) >= self.period:
-                self.value = sum(self._init_buf) / len(self._init_buf)
-            return self.value
-        self.value = price * self.k + self.value * (1 - self.k)
-        return self.value
-
-    @property
-    def ready(self) -> bool:
-        return self.value is not None
-
-
-class _MACD:
-    """MACD = EMA(fast) - EMA(slow)；Signal = EMA(signal) of MACD；Hist = MACD - Signal"""
-    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
-        self._ema_fast = _RunningEMA(fast)
-        self._ema_slow = _RunningEMA(slow)
-        self._ema_signal = _RunningEMA(signal)
-        self.macd: float | None = None
-        self.signal_line: float | None = None
-        self.hist: float | None = None
-
-    def update(self, price: float) -> bool:
-        ef = self._ema_fast.update(price)
-        es = self._ema_slow.update(price)
-        if ef is None or es is None:
-            return False
-        self.macd = ef - es
-        sig = self._ema_signal.update(self.macd)
-        if sig is None:
-            return False
-        self.signal_line = sig
-        self.hist = self.macd - self.signal_line
-        return True
-
-    @property
-    def ready(self) -> bool:
-        return self.hist is not None
-
-
-class _ATR:
-    """真实波幅均值（EMA平滑）"""
-    def __init__(self, period: int = 14):
-        self._ema = _RunningEMA(period)
-        self._prev_close: float | None = None
-        self.value: float | None = None
-
-    def update(self, high: float, low: float, close: float) -> float | None:
-        if self._prev_close is not None:
-            tr = max(
-                high - low,
-                abs(high - self._prev_close),
-                abs(low - self._prev_close),
-            )
-            self.value = self._ema.update(tr)
-        self._prev_close = close
-        return self.value
-
-    @property
-    def ready(self) -> bool:
-        return self.value is not None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 持仓状态机
-# ──────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class _State:
-    flat: bool = True
-    pos_side: PosSide = PosSide.NET
-    entry_price: float = 0.0
-    stop_loss: float = 0.0
-
-    def open(self, pos_side: PosSide, entry_price: float, stop_loss: float):
-        self.flat = False
-        self.pos_side = pos_side
-        self.entry_price = entry_price
-        self.stop_loss = stop_loss
-
-    def close(self):
-        self.flat = True
-        self.pos_side = PosSide.NET
-        self.entry_price = 0.0
-        self.stop_loss = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -152,14 +51,18 @@ class TrendStrategy(BaseStrategy):
         macd_signal = config.get("macd_signal", 9)
         atr_period = config.get("atr_period", 14)
 
-        self._ema_fast = _RunningEMA(ema_fast)
-        self._ema_slow = _RunningEMA(ema_slow)
-        self._macd = _MACD(macd_fast, macd_slow, macd_signal)
-        self._atr = _ATR(atr_period)
+        self._ema_fast = RunningEMA(ema_fast)
+        self._ema_slow = RunningEMA(ema_slow)
+        self._macd = RunningMACD(macd_fast, macd_slow, macd_signal)
+        self._atr = RunningATR(atr_period)
         self._sl_mult = config.get("atr_sl_multiplier", 2.0)
 
-        # 预热所需K线数：最长 EMA 周期 × 3 保证收敛（初始SMA影响 < 3%），再加信号线缓冲
-        self.warm_up_period = max(ema_slow * 3, macd_slow + macd_signal, atr_period) + 10
+        # 预热所需K线数：EMA × 3 保证收敛，MACD 需 (slow + signal) × 3 让三层 EMA 完全展开
+        self.warm_up_period = max(
+            ema_slow * 3,
+            (macd_slow + macd_signal) * 3,
+            atr_period * 3,
+        ) + 10
 
         # 上一根K线的EMA值（用于检测交叉）
         self._prev_ema_fast: float | None = None
@@ -167,7 +70,7 @@ class TrendStrategy(BaseStrategy):
         self._prev_hist: float | None = None
 
         # 策略内部持仓状态
-        self._state = _State()
+        self._state = PositionState()
         self._can_short = (inst_type == InstType.SWAP)
 
         # ── 过滤器参数 ────────────────────────────────────────────────────────
@@ -353,30 +256,9 @@ class TrendStrategy(BaseStrategy):
         )
 
     def _close_signal(self, price: float, reason: str) -> Signal | None:
-        if self._state.flat:
-            return None
-        if self._state.pos_side == PosSide.LONG:
-            side = OrderSide.SELL
-            pos_side = PosSide.LONG if self._can_short else PosSide.NET
-        else:
-            side = OrderSide.BUY
-            pos_side = PosSide.SHORT
-
-        # 从 portfolio 获取持仓量
-        pos = self._portfolio.get_position(self.symbol, self._state.pos_side.value)
-        qty = pos.size if pos else 0.0
-
-        if qty <= 0:
-            logger.warning(f"[{self.name}] Close signal but no position found, skip")
-            return None
-
-        return Signal(
-            inst_id=self.symbol,
-            side=side,
-            order_type=OrderType.MARKET,
-            qty=qty,
-            pos_side=pos_side,
-            reason=reason,
+        return build_close_signal(
+            self._state, self.symbol, self._portfolio,
+            self._can_short, reason, self.name,
         )
 
     # ── 工具方法 ───────────────────────────────────────────────────────────────
