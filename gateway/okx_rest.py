@@ -226,6 +226,13 @@ class OKXRestClient:
             body["px"] = str(order.price)
         if order.client_order_id:
             body["clOrdId"] = order.client_order_id
+        # 附加止损：OKX 会在主单成交后挂出 SL 触发单（市价平仓），进程崩溃仍有效
+        if order.stop_loss is not None and order.stop_loss > 0:
+            body["attachAlgoOrds"] = [{
+                "slTriggerPx": str(order.stop_loss),
+                "slOrdPx": "-1",          # -1 = 市价平仓
+                "slTriggerPxType": "last",
+            }]
 
         logger.info(f"Placing order: {body}")
 

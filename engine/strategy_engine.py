@@ -203,10 +203,21 @@ class StrategyEngine:
     # ── 后台循环 ───────────────────────────────────────────────────────────────
 
     async def _portfolio_refresh_loop(self):
-        """每 60 秒通过 REST 全量刷新账户状态"""
+        """每 60 秒通过 REST 全量刷新账户状态，并让各策略对齐本地持仓视图"""
         while self._running:
             await asyncio.sleep(60)
             await self._portfolio.refresh(self._rest)
+            # 刷新后让每个策略用真实持仓修正本地状态（爆仓/外部平仓/交易所SL触发等）
+            for strategy in self._strategies:
+                try:
+                    # 合约走 pos_side 分仓；现货统一 NET
+                    pos_long  = self._portfolio.get_position(strategy.symbol, "long")
+                    pos_short = self._portfolio.get_position(strategy.symbol, "short")
+                    pos_net   = self._portfolio.get_position(strategy.symbol, "net")
+                    position = pos_long or pos_short or pos_net
+                    strategy.reconcile_position(position)
+                except Exception as e:
+                    logger.error(f"[{strategy.name}] reconcile failed: {e}")
 
     async def _daily_reset_loop(self):
         """每天 UTC 00:01 重置日内风控统计"""

@@ -72,6 +72,7 @@ class Order:
     fee: float = 0.0
     ts: datetime = field(default_factory=datetime.utcnow)
     strategy_name: str = ""
+    stop_loss: float | None = None   # 交易所侧附加止损触发价（OKX attachAlgoOrds）
 
 
 @dataclass

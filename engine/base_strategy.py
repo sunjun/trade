@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from gateway.models import Candle, InstType, Order, Signal
+from gateway.models import Candle, InstType, Order, Position, Signal
 
 if TYPE_CHECKING:
     from engine.portfolio import Portfolio
@@ -61,6 +61,32 @@ class BaseStrategy(ABC):
         if state is not None and hasattr(state, "close"):
             state.close()
 
+    def reconcile_position(self, position: "Position | None"):
+        """将策略本地状态与交易所真实持仓对齐。引擎在 REST 刷新后调用。
+        默认实现：
+          - 本地认为无仓但交易所有仓：仅告警（可能是外部手动开仓，不接管）
+          - 本地认为有仓但交易所无仓：重置为 FLAT（爆仓/手动平仓/交易所SL触发后的恢复）
+        子类可 override 以实现更精细的对齐（如 Grid 清理 slots）。
+        """
+        state = getattr(self, "_state", None)
+        if state is None:
+            return
+
+        exchange_has = position is not None and position.size > 0
+        local_has = not getattr(state, "flat", True)
+
+        if local_has and not exchange_has:
+            logger.warning(
+                f"[{self.name}] Reconcile: local state has position but exchange does not; "
+                f"resetting to FLAT (likely closed externally or SL triggered)"
+            )
+            self.reset_position_state()
+        elif exchange_has and not local_has:
+            logger.warning(
+                f"[{self.name}] Reconcile: exchange has position {position.pos_side.value} "
+                f"size={position.size} but local state is FLAT; ignoring (not adopting)"
+            )
+
     # ── 引擎调用 ───────────────────────────────────────────────────────────────
 
     async def handle_candle(self, candles: list[Candle]):
@@ -99,6 +125,8 @@ class BaseStrategy(ABC):
             f"[{self.name}] Placing order: {signal.side.value.upper()} "
             f"{qty} {signal.inst_id} @ MARKET"
         )
+        # 带 stop_loss 的信号视为"开仓"，失败时应回滚本地状态，避免策略以为已开仓
+        is_open_signal = signal.stop_loss is not None
         order = Signal.to_order(signal, self.name)
         try:
             order = await self._rest.place_order(order, self.inst_type)
@@ -110,6 +138,12 @@ class BaseStrategy(ABC):
             )
         except RuntimeError as e:
             logger.error(f"[{self.name}] Order FAILED: {e}")
+            if is_open_signal:
+                logger.critical(
+                    f"[{self.name}] Rolling back local state to FLAT after open-signal failure"
+                )
+                self.reset_position_state()
+            # 平仓失败时保留 _state，下根 K 线或下次 reconcile 会重试/修正
 
     async def _calc_qty(self, signal: Signal) -> float:
         """根据账户余额和配置计算下单量"""
@@ -152,6 +186,7 @@ def _signal_to_order(signal: Signal, strategy_name: str) -> Order:
         price=signal.price,
         pos_side=signal.pos_side,
         strategy_name=strategy_name,
+        stop_loss=signal.stop_loss,
     )
 
 

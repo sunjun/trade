@@ -271,3 +271,21 @@ class GridStrategy(BaseStrategy):
             f"[{self.name}] Stopped. "
             f"longs={len(self._long_slots)} shorts={len(self._short_slots)}"
         )
+
+    def reset_position_state(self):
+        """网格没有单一 _state，重置 = 清空所有槽位"""
+        self._long_slots.clear()
+        self._short_slots.clear()
+
+    def reconcile_position(self, position):
+        """网格对账：若交易所完全无仓但本地还有槽位，清空槽位。
+        若两侧都有仓但总量不一致，仅告警（不自动调整——网格的槽位有序意义）。"""
+        if position is None or position.size == 0:
+            if self._long_slots or self._short_slots:
+                logger.warning(
+                    f"[{self.name}] Reconcile: no exchange position but "
+                    f"longs={len(self._long_slots)} shorts={len(self._short_slots)}; "
+                    f"clearing all slots"
+                )
+                self._long_slots.clear()
+                self._short_slots.clear()
