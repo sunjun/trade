@@ -1,6 +1,6 @@
 # 环境变量（含 API 密钥）
 .env
-.env.*
+
 
 # Python
 __pycache__/
