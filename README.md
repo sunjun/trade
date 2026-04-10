@@ -1,39 +1,47 @@
-# OKX 策略交易系统
+# OKX 策略交易与回测系统
 
-基于 Python asyncio 的 OKX 量化交易框架，支持现货与永续合约，内置趋势跟踪策略。
+基于 Python `asyncio` 的 OKX 量化交易与多时框回测框架，支持现货与永续合约，内置三重共振趋势跟踪策略（MtfTrendStrategy）。
 
 ## 功能特性
 
-- **全异步架构**：基于 asyncio + WebSocket，低延迟实时行情处理
-- **双品种支持**：现货（SPOT）和永续合约（SWAP）统一接口
-- **趋势策略**：EMA 金叉死叉 + MACD 确认 + ATR 动态止损
-- **多层风控**：下单频率限制、单策略日内亏损熔断、全局最大回撤紧急停止
-- **指标预热**：启动时自动拉取历史 K 线完成指标初始化，避免冷启动信号失真
-- **数据持久化**：SQLite 存储 K 线、信号、订单及每日盈亏统计
-- **CLI 工具**：余额、持仓、行情、历史订单、信号记录一键查询
+- **全异步实盘架构**：基于 `asyncio` + WebSocket，低延迟实时行情处理。
+- **本地回测引擎**：支持多时框对齐回放引擎。策略代码**零修改**即可在实盘与回测间无缝切换。
+- **三重共振策略**：支持跨时框（如 4H, 1H, 15m）EMA + MACD 趋势共振诊断，结合 ATR 动态止损。
+- **数据本地缓存**：回测时自动拉取 OKX 历史 K 线并缓存为 CSV，支持断点增量更新拉取，极速验证策略。
+- **多层风控机制**：下单频率限制、单策略日内亏损熔断、全局最大回撤紧急停止。
+- **指标自动预热**：启动时自动拉取历史极限 K 线完成指标初始化，避免冷启动信号失真。
+- **可视化与数据持久化**：SQLite 存储实时订单与信号；回测输出自动生成净值图表及详细交易 CSV。
 
 ## 项目结构
 
-```
+```text
 trade/
-├── main.py                  # 程序入口
-├── cli.py                   # 命令行工具
+├── main.py                  # 实盘系统入口
+├── cli.py                   # 命令行快捷查询工具
 ├── config/
-│   ├── settings.py          # 全局配置（API 密钥、风控参数）
-│   └── strategies.yaml      # 策略配置文件
+│   ├── settings.py          # 全局配置（环境变量解析）
+│   └── strategies.yaml      # 策略与参数配置文件
+├── backtest/                # 🚀 回测模块
+│   ├── run_backtest.py      # 单策略回测 CLI
+│   ├── run_all.py           # 批量并列回测所有策略 CLI
+│   ├── engine.py            # 多时框回测引擎与 Mock 对象
+│   ├── data_loader.py       # OKX 历史数据拉取与本地 CSV 缓存
+│   └── report.py            # 量化指标计算与 matplotlib 绘图
 ├── engine/
-│   ├── strategy_engine.py   # 核心引擎：生命周期管理、行情路由
+│   ├── strategy_engine.py   # 实盘引擎核心：生命周期与行情路由
 │   ├── base_strategy.py     # 策略基类
-│   ├── risk_manager.py      # 风控模块
-│   └── portfolio.py         # 持仓视图
+│   ├── risk_manager.py      # 实盘风控模块
+│   └── portfolio.py         # 账户资产与持仓视图
 ├── gateway/
-│   ├── models.py            # 数据模型（Candle、Signal、Order 等）
+│   ├── models.py            # 数据模型
 │   ├── okx_rest.py          # OKX REST API 客户端
 │   └── okx_ws.py            # OKX WebSocket 客户端
 ├── strategies/
-│   └── trend.py             # 趋势策略实现
+│   ├── mtftrend.py          # 多时框共振趋势策略
+│   ├── _base_state.py       # 状态机辅助
+│   └── ...                  # 其他策略
 └── storage/
-    └── db.py                # SQLite 数据访问层
+    └── db.py                # SQLite 数据访问
 ```
 
 ## 快速开始
@@ -44,7 +52,7 @@ trade/
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API 密钥
+### 2. 配置环境与策略
 
 在项目根目录创建 `.env` 文件：
 
@@ -55,81 +63,58 @@ OKX__PASSPHRASE=your_passphrase
 OKX__IS_DEMO=true    # true = 模拟盘，false = 实盘
 ```
 
-### 3. 配置策略
-
-编辑 `config/strategies.yaml`，按需启用/禁用策略并调整参数：
-
+编辑 `config/strategies.yaml` 按需启用并配置实盘/回测策略：
 ```yaml
 strategies:
-  - name: btc_trend_spot
-    class: TrendStrategy
+  - name: eth_mtf_swap
+    class: MtfTrendStrategy
     enabled: true
-    inst_type: SPOT
-    symbol: BTC-USDT
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
     config:
-      timeframe: "5m"
-      ema_fast: 9
-      ema_slow: 21
-      macd_fast: 5
-      macd_slow: 13
-      macd_signal: 3
-      atr_sl_multiplier: 2.0
-      position_size_pct: 0.1    # 单仓占账户权益比例
-      require_spread_expand: true
-      cooldown_candles: 3
+      timeframe: "15m"
+      # ... 详见策略 yaml 示例
 ```
 
-### 4. 启动引擎
+---
+
+## 回测 (Backtesting)
+
+无需修改任何策略运行代码，直接使用历史数据模拟撮合：
+
+**单策略回测：**
+```bash
+# 执行完毕会自动在当前目录下/backtest_results 生成走势图与 CSV 交易记录
+python -m backtest.run_backtest --strategy eth_mtf_swap --capital 10000 --max-bars 15000 --out-dir backtest_results
+```
+
+**批量测试所有策略：**
+```bash
+python -m backtest.run_all --capital 10000 --max-bars 20000 --out-dir backtest_results
+```
+
+> **提示**：首次回测会自动从 OKX 获取历史 K 线并缓存。如果需要强制拉取最新的修复数据，可添加 `--force-download`。
+
+---
+
+## 实盘运行 (Live Trading)
+
+确认你的 `.env` 中 `IS_DEMO` 无误后即可启动：
 
 ```bash
 python main.py
 ```
 
-## CLI 使用
-
+### CLI 实用工具
+运行过程中可以使用系统自带 CLI 查询本地数据库或交易所情况：
 ```bash
-python cli.py --help
-
-python cli.py balance              # 查看账户余额
-python cli.py positions            # 查看当前持仓
-python cli.py ticker BTC-USDT      # 查看行情
-python cli.py orders -s btc_trend_spot -n 50   # 查看历史订单
-python cli.py signals -s btc_trend_spot        # 查看信号记录
-python cli.py pnl -d 7             # 查看近 7 天盈亏统计
-python cli.py candles BTC-USDT -t 5m -n 30    # 查看已保存K线
+python cli.py balance              # 账户可用资金
+python cli.py positions            # 仓位全览
+python cli.py ticker BTC-USDT      # 最新行情
+python cli.py orders -s eth_mtf_swap  # 指定策略历史订单
+python cli.py signals -s eth_mtf_swap # 信号日志
 ```
 
-## 趋势策略说明
-
-**入场条件（同时满足）：**
-- EMA(fast) 上穿 EMA(slow)（金叉）
-- MACD 柱体 > 0（多头动能确认）
-- EMA 间距正在扩大（`require_spread_expand`，过滤假突破）
-- 距上次交易间隔 ≥ `cooldown_candles` 根K线
-
-**止损：** `入场价 - ATR × atr_sl_multiplier`
-
-**出场：** EMA 死叉，或触及止损价
-
-空头入场/出场逻辑对称，仅合约品种支持。
-
-## 风控参数
-
-在 `.env` 中配置（或使用默认值）：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `RISK__MAX_POSITION_PCT` | 0.1 | 单品种最大仓位占权益比例 |
-| `RISK__MAX_DAILY_LOSS_PCT` | 0.02 | 策略日内最大亏损比例，超出则暂停该策略 |
-| `RISK__MAX_DRAWDOWN_PCT` | 0.05 | 账户最大回撤比例，超出则紧急停止所有策略 |
-| `RISK__ORDER_RATE_LIMIT` | 10 | 每秒最大下单次数 |
-
-## 扩展策略
-
-在 `strategies/` 目录下新建文件（如 `grid.py`），继承 `BaseStrategy` 并实现 `on_candle` 方法，在 `strategies.yaml` 中添加对应配置即可自动加载。
-
-## 注意事项
-
-- 实盘交易前请在模拟盘（`IS_DEMO=true`）充分测试
-- 策略参数需根据市场行情定期回测调整
-- 日志文件保存在 `logs/` 目录，自动按天轮转并压缩保留 30 天
+## 数据声明 / 免责
+- 投资有风险，实盘前**必须**在 OKX 模拟盘 (`IS_DEMO=true`) 中运行至少一周进行观察！
+- 日志文件保存在 `logs/` 目录，自动按天轮转并压缩保留 30 天。
