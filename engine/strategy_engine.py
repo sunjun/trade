@@ -141,31 +141,49 @@ class StrategyEngine:
         )
 
     async def _setup_strategy(self, strategy):
-        """预热历史K线，然后订阅实时行情"""
+        """预热历史K线，然后订阅实时行情。
+        支持多时框策略：若策略暴露 extra_tf_configs 属性，
+        则额外预热并订阅更高时框的 K 线。
+        """
+        symbol    = strategy.symbol
         timeframe = strategy.config.get("timeframe", "15m")
-        warm_up = strategy.warm_up_period
+        warm_up   = strategy.warm_up_period
 
+        # ── 先预热额外时框（4H / 1H），使高时框指标在主周期启动前就绪 ──────────
+        if hasattr(strategy, "extra_tf_configs"):
+            for tf, tf_warm_up, handler in strategy.extra_tf_configs:
+                logger.info(
+                    f"[{strategy.name}] Warming up {tf_warm_up} candles ({tf}) [extra TF]...")
+                extra_candles = await self._rest.get_candles(
+                    symbol, tf, limit=tf_warm_up + 5)
+                for candle in extra_candles:
+                    candle.confirmed = True
+                    await handler([candle])
+                # 通知策略该时框预热完成
+                if hasattr(strategy, "on_extra_tf_warmed"):
+                    strategy.on_extra_tf_warmed(tf)
+                # 订阅该时框实时 K 线
+                self._ws.subscribe_candles(symbol, tf, handler)
+                logger.info(f"[{strategy.name}] {tf} warm-up done, subscribed")
+
+        # ── 预热主执行时框（15M）──────────────────────────────────────────────
         logger.info(f"[{strategy.name}] Warming up {warm_up} candles ({timeframe})...")
-        candles = await self._rest.get_candles(strategy.symbol, timeframe, limit=warm_up + 5)
-
-        # 历史K线喂入策略（预热，不执行信号）
+        candles = await self._rest.get_candles(symbol, timeframe, limit=warm_up + 5)
         for candle in candles:
-            candle.confirmed = True  # 历史K线均视为已收盘
+            candle.confirmed = True
             await strategy.on_candle(candle)
         strategy._warm_up_done = True
-        # 预热只用于初始化指标，状态机必须重置为 FLAT
-        # 否则预热期间出现的交叉信号会错误地把策略标记为持仓
-        strategy._state.close()
+        strategy._state.close()   # 重置为 FLAT，避免预热期间的虚假信号污染状态机
         logger.info(f"[{strategy.name}] Warm-up complete, state reset to FLAT")
 
         # 设置合约杠杆
         if strategy.inst_type == InstType.SWAP:
             leverage = strategy.config.get("leverage", 1)
-            td_mode = strategy.config.get("td_mode", "cross")
-            await self._rest.set_leverage(strategy.symbol, leverage, td_mode)
+            td_mode  = strategy.config.get("td_mode", "cross")
+            await self._rest.set_leverage(symbol, leverage, td_mode)
 
-        # 订阅实时K线
-        self._ws.subscribe_candles(strategy.symbol, timeframe, strategy.handle_candle)
+        # 订阅主执行时框实时 K 线
+        self._ws.subscribe_candles(symbol, timeframe, strategy.handle_candle)
 
     # ── WebSocket 事件处理 ─────────────────────────────────────────────────────
 

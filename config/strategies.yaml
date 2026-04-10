@@ -1,4 +1,67 @@
 strategies:
+  # ── 多时框趋势策略：4H 定方向 + 1H 做决策 + 15M 找买卖点 ─────────────
+  - name: eth_mtf_swap
+    class: MtfTrendStrategy
+    enabled: false                # 测试完毕后改为 true
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      # 4H：宏观趋势
+      h4_timeframe: "4H"
+      h4_ema_fast: 20
+      h4_ema_slow: 50
+      h4_vol_period: 20
+      # 1H：中期偏向
+      h1_timeframe: "1H"
+      h1_ema_fast: 9
+      h1_ema_slow: 21
+      h1_macd_fast: 12
+      h1_macd_slow: 26
+      h1_macd_signal: 9
+      h1_vol_period: 20
+      # 15M：精确入场（执行时框）
+      timeframe: "15m"
+      m15_ema_fast: 9
+      m15_ema_slow: 21
+      m15_vol_period: 20
+      # 公共参数
+      atr_period: 14
+      atr_sl_multiplier: 2.0
+      vol_threshold: 1.2          # 入场要求成交量 >= 均量 x 1.2
+      position_size_pct: 0.1
+      leverage: 5
+      td_mode: cross
+      cooldown_candles: 2
+
+  - name: btc_mtf_swap
+    class: MtfTrendStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: BTC-USDT-SWAP
+    config:
+      h4_timeframe: "4H"
+      h4_ema_fast: 20
+      h4_ema_slow: 50
+      h4_vol_period: 20
+      h1_timeframe: "1H"
+      h1_ema_fast: 9
+      h1_ema_slow: 21
+      h1_macd_fast: 12
+      h1_macd_slow: 26
+      h1_macd_signal: 9
+      h1_vol_period: 20
+      timeframe: "15m"
+      m15_ema_fast: 9
+      m15_ema_slow: 21
+      m15_vol_period: 20
+      atr_period: 14
+      atr_sl_multiplier: 2.5
+      vol_threshold: 1.2
+      position_size_pct: 0.1
+      leverage: 3
+      td_mode: cross
+      cooldown_candles: 2
+
   # ── 现货趋势策略 ──────────────────────────────────────────────────────
   - name: btc_trend_spot
     class: TrendStrategy
