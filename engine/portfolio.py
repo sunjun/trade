@@ -51,7 +51,10 @@ class Portfolio:
                     self._positions[key] = p
 
     async def on_order_filled(self, order: Order):
-        """现货订单成交后更新余额（估算）"""
+        """现货订单成交后更新 USDT 余额估算。
+        注意：total 是账户权益（USDT 余额 + 持仓折算），买入时 USDT 转为 base 资产，
+        权益只减少手续费；卖出时同理。available 是可动用 USDT，买入要扣掉花掉的 USDT，
+        卖出则增加。下次 REST 全量刷新会用真实数据覆盖。"""
         if order.status != OrderStatus.FILLED:
             return
         async with self._lock:
@@ -59,12 +62,13 @@ class Portfolio:
             if not bal:
                 return
             fill_value = order.filled_qty * order.avg_fill_price
+            fee = abs(order.fee)  # OKX fee 为负数表示支出
             if order.side.value == "buy":
-                bal.available = max(0, bal.available - fill_value)
-                bal.total = max(0, bal.total - fill_value + order.fee)
+                bal.available = max(0.0, bal.available - fill_value - fee)
+                bal.total = max(0.0, bal.total - fee)
             else:
-                bal.available += fill_value + order.fee
-                bal.total += fill_value + order.fee
+                bal.available += fill_value - fee
+                bal.total = max(0.0, bal.total - fee)
 
     # ── 查询接口 ───────────────────────────────────────────────────────────────
 

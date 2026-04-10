@@ -74,7 +74,7 @@ class GridStrategy(BaseStrategy):
         tf = self.config.get("timeframe", "?")
         zone = self._zone(close)
 
-        logger.info(
+        logger.debug(
             f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] C={close:.4f} | "
             f"zone={zone}/{self._n_grids} "
             f"longs={len(self._long_slots)} shorts={len(self._short_slots)} "

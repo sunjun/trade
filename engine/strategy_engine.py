@@ -1,7 +1,7 @@
 """策略引擎——整合所有组件，管理策略生命周期"""
 import asyncio
 import importlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -173,7 +173,7 @@ class StrategyEngine:
             candle.confirmed = True
             await strategy.on_candle(candle)
         strategy._warm_up_done = True
-        strategy._state.close()   # 重置为 FLAT，避免预热期间的虚假信号污染状态机
+        strategy.reset_position_state()   # 重置为 FLAT，避免预热期间的虚假信号污染状态机
         logger.info(f"[{strategy.name}] Warm-up complete, state reset to FLAT")
 
         # 设置合约杠杆
@@ -215,6 +215,6 @@ class StrategyEngine:
             # 计算到明天 00:01 的秒数
             tomorrow = now.replace(hour=0, minute=1, second=0, microsecond=0)
             if tomorrow <= now:
-                tomorrow = tomorrow.replace(day=tomorrow.day + 1)
+                tomorrow = tomorrow + timedelta(days=1)
             await asyncio.sleep((tomorrow - now).total_seconds())
             self._risk.reset_daily()

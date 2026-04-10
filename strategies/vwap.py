@@ -109,7 +109,7 @@ class VwapStrategy(BaseStrategy):
         pos_str = "FLAT" if self._state.flat else (
             f"{self._state.pos_side.value.upper()} entry={self._state.entry_price:.4f} sl={self._state.stop_loss:.4f}"
         )
-        logger.info(
+        logger.debug(
             f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] C={close:.4f} | "
             f"VWAP={vwap:.4f} bands=[{lower:.4f},{upper:.4f}] "
             f"RSI={rsi:.1f} ATR={atr:.4f} | {pos_str}"

@@ -53,6 +53,14 @@ class BaseStrategy(ABC):
     async def on_stop(self):
         """策略停止时的清理（可选override）"""
 
+    def reset_position_state(self):
+        """重置策略内部持仓状态机为 FLAT（预热结束或外部强制平仓后调用）。
+        默认实现：若子类持有 `_state` 且其有 `close()` 方法，则调用。
+        子类可 override 实现更复杂的重置逻辑。"""
+        state = getattr(self, "_state", None)
+        if state is not None and hasattr(state, "close"):
+            state.close()
+
     # ── 引擎调用 ───────────────────────────────────────────────────────────────
 
     async def handle_candle(self, candles: list[Candle]):

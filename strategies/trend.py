@@ -208,7 +208,7 @@ class TrendStrategy(BaseStrategy):
                        f"uPnL={pnl:+.4f}")
 
         if candle.confirmed:
-            logger.info(
+            logger.debug(
                 f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
                 f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
                 f"V={candle.volume:.2f} | "

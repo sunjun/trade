@@ -118,7 +118,7 @@ class DonchianStrategy(BaseStrategy):
         pos_str = "FLAT" if self._state.flat else (
             f"{self._state.pos_side.value.upper()} entry={self._state.entry_price:.4f} sl={self._state.stop_loss:.4f}"
         )
-        logger.info(
+        logger.debug(
             f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] C={close:.4f} | "
             f"EntryH={prev_entry_high:.4f} EntryL={prev_entry_low:.4f} "
             f"ExitH={prev_exit_high:.4f} ExitL={prev_exit_low:.4f} ATR={atr:.4f} | {pos_str}"

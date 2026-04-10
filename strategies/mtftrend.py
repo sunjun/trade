@@ -381,7 +381,7 @@ class MtfTrendStrategy(BaseStrategy):
                        f"entry={self._state.entry_price:.4f} "
                        f"sl={self._state.stop_loss:.4f} uPnL={pnl:+.4f}")
 
-        logger.info(
+        logger.debug(
             f"[{self.name}][15M] {candle.ts.strftime('%m-%d %H:%M')} "
             f"C={close:.4f} V={vol:.0f}(ma={vol_ma:.0f})  "
             f"EMA{self._m15.ema_fast.period}={ef:.4f} "
@@ -422,53 +422,51 @@ class MtfTrendStrategy(BaseStrategy):
         # ── 入场 ──────────────────────────────────────────────────────────────
         if self._state.flat and all_warmed and cooldown_ok:
 
-            if golden_cross and vol_spike and self._h4_trend >= 0 and self._h1_bias >= 0:
-                # 三重共振多头入场（至少 4H 中性以上 + 1H 中性以上）
-                if self._h4_trend > 0 or self._h1_bias > 0:
-                    sl = close - self._sl_mult * atr
-                    sig = Signal(
-                        inst_id=self.symbol,
-                        side=OrderSide.BUY,
-                        order_type=OrderType.MARKET,
-                        qty=0,
-                        pos_side=PosSide.LONG if self._can_short else PosSide.NET,
-                        stop_loss=sl,
-                        reason=(f"LONG entry | 4H={self._h4_trend:+d} 1H={self._h1_bias:+d} "
-                                f"15M golden-cross | vol={vol:.0f}/{vol_ma:.0f} "
-                                f"SL={sl:.4f}"),
-                    )
-                    signals.append(sig)
-                    self._state.open(PosSide.LONG, close, sl)
-                    self._candles_since = 0
-                    logger.info(
-                        f"[{self.name}] ▲ LONG ENTRY @ {close:.4f}  SL={sl:.4f}  "
-                        f"4H={self._h4_trend:+d}  1H={self._h1_bias:+d}  "
-                        f"vol={vol:.0f}/{vol_ma:.0f}×{self._vol_threshold}"
-                    )
+            # 三重共振多头入场：4H 必须明确向上定方向，1H 至少不反对，15M 金叉+放量触发
+            if golden_cross and vol_spike and self._h4_trend > 0 and self._h1_bias >= 0:
+                sl = close - self._sl_mult * atr
+                sig = Signal(
+                    inst_id=self.symbol,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.MARKET,
+                    qty=0,
+                    pos_side=PosSide.LONG if self._can_short else PosSide.NET,
+                    stop_loss=sl,
+                    reason=(f"LONG entry | 4H={self._h4_trend:+d} 1H={self._h1_bias:+d} "
+                            f"15M golden-cross | vol={vol:.0f}/{vol_ma:.0f} "
+                            f"SL={sl:.4f}"),
+                )
+                signals.append(sig)
+                self._state.open(PosSide.LONG, close, sl)
+                self._candles_since = 0
+                logger.info(
+                    f"[{self.name}] ▲ LONG ENTRY @ {close:.4f}  SL={sl:.4f}  "
+                    f"4H={self._h4_trend:+d}  1H={self._h1_bias:+d}  "
+                    f"vol={vol:.0f}/{vol_ma:.0f}×{self._vol_threshold}"
+                )
 
             elif (self._can_short and death_cross and vol_spike
-                  and self._h4_trend <= 0 and self._h1_bias <= 0):
-                if self._h4_trend < 0 or self._h1_bias < 0:
-                    sl = close + self._sl_mult * atr
-                    sig = Signal(
-                        inst_id=self.symbol,
-                        side=OrderSide.SELL,
-                        order_type=OrderType.MARKET,
-                        qty=0,
-                        pos_side=PosSide.SHORT,
-                        stop_loss=sl,
-                        reason=(f"SHORT entry | 4H={self._h4_trend:+d} 1H={self._h1_bias:+d} "
-                                f"15M death-cross | vol={vol:.0f}/{vol_ma:.0f} "
-                                f"SL={sl:.4f}"),
-                    )
-                    signals.append(sig)
-                    self._state.open(PosSide.SHORT, close, sl)
-                    self._candles_since = 0
-                    logger.info(
-                        f"[{self.name}] ▼ SHORT ENTRY @ {close:.4f}  SL={sl:.4f}  "
-                        f"4H={self._h4_trend:+d}  1H={self._h1_bias:+d}  "
-                        f"vol={vol:.0f}/{vol_ma:.0f}×{self._vol_threshold}"
-                    )
+                  and self._h4_trend < 0 and self._h1_bias <= 0):
+                sl = close + self._sl_mult * atr
+                sig = Signal(
+                    inst_id=self.symbol,
+                    side=OrderSide.SELL,
+                    order_type=OrderType.MARKET,
+                    qty=0,
+                    pos_side=PosSide.SHORT,
+                    stop_loss=sl,
+                    reason=(f"SHORT entry | 4H={self._h4_trend:+d} 1H={self._h1_bias:+d} "
+                            f"15M death-cross | vol={vol:.0f}/{vol_ma:.0f} "
+                            f"SL={sl:.4f}"),
+                )
+                signals.append(sig)
+                self._state.open(PosSide.SHORT, close, sl)
+                self._candles_since = 0
+                logger.info(
+                    f"[{self.name}] ▼ SHORT ENTRY @ {close:.4f}  SL={sl:.4f}  "
+                    f"4H={self._h4_trend:+d}  1H={self._h1_bias:+d}  "
+                    f"vol={vol:.0f}/{vol_ma:.0f}×{self._vol_threshold}"
+                )
 
         # ── 出场：15M 反向交叉 ─────────────────────────────────────────────────
         elif not self._state.flat:
