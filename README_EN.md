@@ -1,135 +1,120 @@
-# OKX Algorithmic Trading System
+# OKX Trading & Backtesting System
 
-An asyncio-based quantitative trading framework for OKX, supporting both spot and perpetual swap markets with a built-in trend-following strategy.
+An `asyncio`-based OKX quantitative trading, and multi-timeframe backtesting framework written in Python. Supports both Spot and Perpetual Swap trading with built-in multi-timeframe convergence strategies (e.g., MtfTrendStrategy).
 
 ## Features
 
-- **Fully async**: Built on asyncio + WebSocket for low-latency real-time market data
-- **Spot & Swap**: Unified interface for both SPOT and perpetual SWAP instruments
-- **Trend strategy**: EMA crossover + MACD confirmation + ATR-based dynamic stop-loss
-- **Multi-layer risk control**: Order rate limiting, per-strategy daily loss circuit breaker, global max drawdown emergency stop
-- **Indicator warm-up**: Fetches historical candles on startup to initialize indicators, preventing cold-start signal distortion
-- **Persistent storage**: SQLite stores candles, signals, orders, and daily P&L statistics
-- **CLI tool**: One-command access to balance, positions, tickers, order history, and signal logs
+- **Asynchronous Live Engine**: Low-latency execution reacting to WebSocket feeds and REST calls built purely on python `asyncio`.
+- **Local Zero-code-change Backtesting**: Replay historical data using exact the same strategy code as live trading by mocking trading environments.
+- **Multiple Timeframe Convergence**: Provides out-of-the-box trend-following models using EMA & MACD overlaps across timeframes (e.g. 4H, 1H, 15m), complete with trail stops via ATR bounds.
+- **Data Caching & Pagination**: Backtester automatically queries and caches candlestick data seamlessly into CSV files, with incremental update capability for ultrafast iteration.
+- **Strict Risk Control**: Multi-layered constraints restricting max trades per second, daily strategy drawdown limits, and global portfolio stop-loss blocks.
+- **Indicator Warm-up**: Automatically fetches historical limit candles on startup to feed technical indicators, ensuring strategies never cold-start with false signals.
+- **Visualization & Persistence**: Internal operations are tracked in a lightning-fast SQLite DB; whereas the backtest engine exports comprehensive CSV reports and plots equity/drawdown charts via `matplotlib`.
 
 ## Project Structure
 
-```
+```text
 trade/
-├── main.py                  # Entry point
-├── cli.py                   # Command-line tool
+├── main.py                  # Live Trading Entrypoint
+├── cli.py                   # Quick-check CLI tool
 ├── config/
-│   ├── settings.py          # Global config (API keys, risk parameters)
-│   └── strategies.yaml      # Strategy configuration
+│   ├── settings.py          # Global env config variables
+│   └── strategies.yaml      # Strategy activation & configurations
+├── backtest/                # 🚀 Backtesting Module
+│   ├── run_backtest.py      # Run simulation for a single strategy
+│   ├── run_all.py           # Batch process & compare all strategies
+│   ├── engine.py            # Multi-TF backtest engine and Mock modules
+│   ├── data_loader.py       # OKX REST fetching & CSV caching module
+│   └── report.py            # Metrics calc & Matplotlib generators
 ├── engine/
-│   ├── strategy_engine.py   # Core engine: lifecycle management, data routing
-│   ├── base_strategy.py     # Strategy base class
-│   ├── risk_manager.py      # Risk control module
-│   └── portfolio.py         # Position tracker
+│   ├── strategy_engine.py   # Live Engine: Routing market feeds & LC handling
+│   ├── base_strategy.py     # Base interface for strategies
+│   ├── risk_manager.py      # Risk constraints enforcer
+│   └── portfolio.py         # Global balances & live position views
 ├── gateway/
-│   ├── models.py            # Data models (Candle, Signal, Order, etc.)
-│   ├── okx_rest.py          # OKX REST API client
-│   └── okx_ws.py            # OKX WebSocket client
+│   ├── models.py            # Standard Dataclasses
+│   ├── okx_rest.py          # OKX REST Client
+│   └── okx_ws.py            # OKX WebSocket Client
 ├── strategies/
-│   └── trend.py             # Trend strategy implementation
+│   ├── mtftrend.py          # Example Multi-Timeframe Trend Strategy
+│   ├── _base_state.py       # Helper functions for position finite-state machine
+│   └── ...                  
 └── storage/
-    └── db.py                # SQLite data access layer
+    └── db.py                # Database API wrapping SQLite 
 ```
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Requirements
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure API credentials
+### 2. Configure Environment
 
-Create a `.env` file in the project root:
+Create a `.env` file at the root of the directory:
 
 ```env
 OKX__API_KEY=your_api_key
 OKX__SECRET_KEY=your_secret_key
 OKX__PASSPHRASE=your_passphrase
-OKX__IS_DEMO=true    # true = paper trading, false = live trading
+OKX__IS_DEMO=true    # true = Paper Trading/Demo, false = Live Real Money
 ```
 
-### 3. Configure strategies
-
-Edit `config/strategies.yaml` to enable/disable strategies and tune parameters:
-
+Adjust your strategy allocations in `config/strategies.yaml`:
 ```yaml
 strategies:
-  - name: btc_trend_spot
-    class: TrendStrategy
+  - name: eth_mtf_swap
+    class: MtfTrendStrategy
     enabled: true
-    inst_type: SPOT
-    symbol: BTC-USDT
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
     config:
-      timeframe: "5m"
-      ema_fast: 9
-      ema_slow: 21
-      macd_fast: 5
-      macd_slow: 13
-      macd_signal: 3
-      atr_sl_multiplier: 2.0
-      position_size_pct: 0.1    # position size as a fraction of account equity
-      require_spread_expand: true
-      cooldown_candles: 3
+      timeframe: "15m"
+      # ... view yaml for more parameter tunings
 ```
 
-### 4. Start the engine
+---
+
+## Backtesting
+
+Without altering a single line of your operational strategy code, replay and validate through history:
+
+**Single Strategy:**
+```bash
+# Executing this generates an equity chart and trades CSV inside /backtest_results directory
+python -m backtest.run_backtest --strategy eth_mtf_swap --capital 10000 --max-bars 15000 --out-dir backtest_results
+```
+
+**Batch Strategy Comparisons:**
+```bash
+python -m backtest.run_all --capital 10000 --max-bars 20000 --out-dir backtest_results
+```
+
+> **Note**: During the first execution, historical Candles are downloaded and saved via OKX endpoints. Add `--force-download` to refresh local cache records.
+ 
+---
+
+## Live Trading
+
+When you've safely validated within the Backtest and the Demo framework (`IS_DEMO=true`), engage the live system:
 
 ```bash
 python main.py
 ```
 
-## CLI Usage
-
+### CLI Utilities
+Check in on operations seamlessly using the script provided:
 ```bash
-python cli.py --help
-
-python cli.py balance                              # Account balance
-python cli.py positions                            # Current positions
-python cli.py ticker BTC-USDT                      # Live ticker
-python cli.py orders -s btc_trend_spot -n 50       # Order history
-python cli.py signals -s btc_trend_spot            # Signal log
-python cli.py pnl -d 7                             # Last 7 days P&L
-python cli.py candles BTC-USDT -t 5m -n 30         # Saved candles
+python cli.py balance              # Query usable funds
+python cli.py positions            # List active positions
+python cli.py ticker BTC-USDT      # Check symbol status
+python cli.py orders -s eth_mtf_swap  # Check recent orders by strategy name
+python cli.py signals -s eth_mtf_swap # Check strategy signal histories
 ```
 
-## Trend Strategy
-
-**Entry conditions (all must be met):**
-- EMA(fast) crosses above EMA(slow) — golden cross
-- MACD histogram > 0 — bullish momentum confirmation
-- EMA spread is widening (`require_spread_expand`) — filters false breakouts
-- Candles since last trade ≥ `cooldown_candles`
-
-**Stop-loss:** `entry_price - ATR × atr_sl_multiplier`
-
-**Exit:** EMA death cross, or stop-loss price hit
-
-Short entry/exit logic is symmetric and only available for SWAP instruments.
-
-## Risk Control Parameters
-
-Configure via `.env` (or use defaults):
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `RISK__MAX_POSITION_PCT` | 0.1 | Max position size per instrument as fraction of equity |
-| `RISK__MAX_DAILY_LOSS_PCT` | 0.02 | Per-strategy daily loss limit; strategy is paused when exceeded |
-| `RISK__MAX_DRAWDOWN_PCT` | 0.05 | Account drawdown limit; all strategies emergency-stopped when exceeded |
-| `RISK__ORDER_RATE_LIMIT` | 10 | Max orders per second across all strategies |
-
-## Adding Custom Strategies
-
-Create a new file under `strategies/` (e.g., `grid.py`), subclass `BaseStrategy`, and implement the `on_candle` method. Add the corresponding entry to `strategies.yaml` — the engine will auto-discover and load it.
-
-## Notes
-
-- Always paper trade (`IS_DEMO=true`) thoroughly before going live
-- Strategy parameters should be backtested and adjusted periodically
-- Logs are stored in `logs/`, rotated daily, compressed, and retained for 30 days
+## Disclaimer
+- Trading algorithms present inherent risks. **ALWAYS** begin with Demo accounts in Paper trading mode for at least a week to verify integrations before live exposure!
+- Output logs are strictly preserved in `/logs` with automated zipping rotation routines (kept for 30 days).
