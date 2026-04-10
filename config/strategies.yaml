@@ -26,12 +26,12 @@ strategies:
       m15_vol_period: 20
       # 公共参数
       atr_period: 14
-      atr_sl_multiplier: 2.0
-      vol_threshold: 1.2          # 入场要求成交量 >= 均量 x 1.2
+      atr_sl_multiplier: 2.5
+      vol_threshold: 1.5          # 入场要求成交量 >= 均量 x 1.2
       position_size_pct: 0.1
       leverage: 5
       td_mode: cross
-      cooldown_candles: 2
+      cooldown_candles: 3
 
   - name: btc_mtf_swap
     class: MtfTrendStrategy

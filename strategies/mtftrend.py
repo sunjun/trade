@@ -95,14 +95,14 @@ class _TfCtx:
     def cross_up(self) -> bool:
         """快线上穿慢线"""
         ef, es = self.ema_fast.value, self.ema_slow.value
-        if ef is None or es is None or self.prev_ef is None:
+        if ef is None or es is None or self.prev_ef is None or self.prev_es is None:
             return False
         return self.prev_ef <= self.prev_es and ef > es
 
     def cross_down(self) -> bool:
         """快线下穿慢线"""
         ef, es = self.ema_fast.value, self.ema_slow.value
-        if ef is None or es is None or self.prev_ef is None:
+        if ef is None or es is None or self.prev_ef is None or self.prev_es is None:
             return False
         return self.prev_ef >= self.prev_es and ef < es
 
