@@ -76,7 +76,7 @@ class VwapStrategy(BaseStrategy):
         self._cooldown: int = config.get("cooldown_candles", 3)
         self._candles_since_trade: int = self._cooldown
 
-        self.warm_up_period = max(rsi_period, atr_period) + 5
+        self.warm_up_period = max(rsi_period * 3, atr_period) + 5
         self._state = _State()
         self._can_short = (inst_type == InstType.SWAP)
         self._last_date: date | None = None  # 用于日期变更时重置 VWAP

@@ -2,7 +2,7 @@ strategies:
   # ── 现货趋势策略 ──────────────────────────────────────────────────────
   - name: btc_trend_spot
     class: TrendStrategy
-    enabled: true
+    enabled: false
     inst_type: SPOT
     symbol: BTC-USDT
     config:
@@ -25,7 +25,7 @@ strategies:
     inst_type: SWAP
     symbol: ETH-USDT-SWAP
     config:
-      timeframe: "5m"
+      timeframe: "15m"
       ema_fast: 9
       ema_slow: 21
       macd_fast: 5

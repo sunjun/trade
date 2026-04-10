@@ -158,8 +158,8 @@ class TrendStrategy(BaseStrategy):
         self._atr = _ATR(atr_period)
         self._sl_mult = config.get("atr_sl_multiplier", 2.0)
 
-        # 预热所需K线数（取最大值 + 缓冲）
-        self.warm_up_period = max(ema_slow, macd_slow + macd_signal, atr_period) + 10
+        # 预热所需K线数：最长 EMA 周期 × 3 保证收敛（初始SMA影响 < 3%），再加信号线缓冲
+        self.warm_up_period = max(ema_slow * 3, macd_slow + macd_signal, atr_period) + 10
 
         # 上一根K线的EMA值（用于检测交叉）
         self._prev_ema_fast: float | None = None
