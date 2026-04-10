@@ -46,8 +46,13 @@ async def main():
         logger.info("Shutdown signal received")
         asyncio.create_task(engine.stop())
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _shutdown)
+    # add_signal_handler 仅 Unix 支持，Windows 降级为 signal.signal
+    if sys.platform != 'win32':
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _shutdown)
+    else:
+        signal.signal(signal.SIGINT,  lambda *_: loop.call_soon_threadsafe(_shutdown))
+        signal.signal(signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(_shutdown))
 
     try:
         await engine.start()
