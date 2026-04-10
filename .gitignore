@@ -43,3 +43,10 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# 回测结果和缓存数据
+backtest_results/
+backtest_cache/
+*.csv
+*chart.png
+cache/

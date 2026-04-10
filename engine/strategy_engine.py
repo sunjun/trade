@@ -47,7 +47,9 @@ class StrategyEngine:
         logger.info("Starting Strategy Engine...")
         await self._db.init()
 
-        async with self._rest:
+        # REST session 覆盖引擎完整生命周期：WS 推送后需要下单/查询时 session 必须有效
+        await self._rest.__aenter__()
+        try:
             # 初始化持仓视图
             await self._portfolio.refresh(self._rest)
 
@@ -64,8 +66,23 @@ class StrategyEngine:
                 self._ws.subscribe_positions(it, self._on_position_update)
 
             # 订阅各策略行情，并完成历史数据预热
+            failed = []
             for strategy in self._strategies:
-                await self._setup_strategy(strategy)
+                try:
+                    await self._setup_strategy(strategy)
+                except Exception as e:
+                    logger.error(
+                        f"[{strategy.name}] Setup failed, removing from active strategies: "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                    failed.append(strategy)
+            for s in failed:
+                self._strategies.remove(s)
+
+            if not self._strategies:
+                logger.error("All strategies failed to set up, engine will not start")
+                return
 
             # 启动 WebSocket
             await self._ws.start()
@@ -84,6 +101,8 @@ class StrategyEngine:
                 await asyncio.gather(*self._tasks)
             except asyncio.CancelledError:
                 pass
+        finally:
+            await self._rest.__aexit__(None, None, None)
 
     async def stop(self):
         logger.info("Stopping Strategy Engine...")
@@ -176,11 +195,16 @@ class StrategyEngine:
         strategy.reset_position_state()   # 重置为 FLAT，避免预热期间的虚假信号污染状态机
         logger.info(f"[{strategy.name}] Warm-up complete, state reset to FLAT")
 
-        # 设置合约杠杆
+        # 设置合约杠杆（失败不阻断启动，仅告警——账户可能有挂单导致 OKX 拒绝调整）
         if strategy.inst_type == InstType.SWAP:
             leverage = strategy.config.get("leverage", 1)
             td_mode  = strategy.config.get("td_mode", "cross")
-            await self._rest.set_leverage(symbol, leverage, td_mode)
+            try:
+                await self._rest.set_leverage(symbol, leverage, td_mode)
+            except RuntimeError as e:
+                logger.warning(
+                    f"[{strategy.name}] set_leverage failed (strategy will still run): {e}"
+                )
 
         # 订阅主执行时框实时 K 线
         self._ws.subscribe_candles(symbol, timeframe, strategy.handle_candle)
