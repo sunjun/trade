@@ -63,4 +63,11 @@ async def main():
 if __name__ == "__main__":
     import os
     os.makedirs("logs", exist_ok=True)
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        # Windows 上 aiohttp/websockets 的网络清理线程会阻塞正常退出，
+        # 引擎已完成 stop() 清理，直接强制终止进程。
+        os._exit(0)

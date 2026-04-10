@@ -2,7 +2,7 @@ strategies:
   # ── 多时框趋势策略：4H 定方向 + 1H 做决策 + 15M 找买卖点 ─────────────
   - name: eth_mtf_swap
     class: MtfTrendStrategy
-    enabled: false                # 测试完毕后改为 true
+    enabled: true # 测试完毕后改为 true
     inst_type: SWAP
     symbol: ETH-USDT-SWAP
     config:
@@ -84,7 +84,7 @@ strategies:
   # ── 合约趋势策略 ──────────────────────────────────────────────────────
   - name: eth_trend_swap
     class: TrendStrategy
-    enabled: true
+    enabled: false
     inst_type: SWAP
     symbol: ETH-USDT-SWAP
     config:
