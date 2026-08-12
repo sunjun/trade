@@ -72,6 +72,22 @@ def test_plan_ladder_rejects_stop_above_entries():
     assert plan_ladder([1.0], [100.0], 120.0, 100.0, CT_VAL) == []
 
 
+def test_plan_ladder_rejects_when_any_single_entry_is_below_stop():
+    """只看加权总和是不够的：支撑位过期时会出现「首仓在止损下方、更深几档
+    在止损上方」，正负相抵后 denom 仍为正，于是规划通过并挂出高于入场价的
+    止损——实盘会被交易所拒单或瞬间触发，回测里则按那个不可达的价"成交"出利润。
+    """
+    w = pyramid_weights(3, 1.3)
+    # 首仓 1881 在止损 2269 下方，但两档"支撑"（过期数据）在止损上方
+    qty = plan_ladder(w, [1881.0, 2600.0, 2500.0], 2269.0, 8.0, 0.1)
+    assert qty == [], "任何一档跌破止损，整个规划就不成立"
+
+    # 加权总和确实是正的——旧的 denom>0 校验放行了它
+    denom = sum(x * (e - 2269.0)
+                for x, e in zip(w, [1881.0, 2600.0, 2500.0], strict=True))
+    assert denom > 0
+
+
 # ── 夹具 ──────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -167,6 +183,46 @@ async def test_worst_case_loss_equals_budget(pyramid):
                for q, e in zip(pyramid._step_qty, entries, strict=True))
     budget = pyramid._portfolio.get_total_equity() * pyramid._risk_pct
     assert loss == pytest.approx(budget)
+
+
+async def test_ladder_spread_reaches_the_lowest_support(make_strategy, fake_rest):
+    """ladder_spread=True 时末档必须落在前低上，让加仓射程和止损射程对齐
+
+    默认行为下阶梯只取最浅的几道支撑，而止损始终在最低支撑下方——
+    中间一大段满仓无摊薄，回测里的滞留超时和止损都出在那一段。
+    """
+    s = make_strategy(PyramidStrategy, rest=fake_rest,
+                      config={"max_steps": 3, "ladder_spread": True})
+    await _warm_higher(s, rising=True)
+    price = s._supports[0] - 1
+
+    entries = s._planned_entries(price)
+    assert len(entries) == 3
+    assert entries[-1] == min(s._supports), "末档应落在最低支撑（前低）"
+    assert entries == sorted(entries, reverse=True), "入场价必须逐档走低"
+
+
+async def test_default_ladder_keeps_shallow_supports(make_strategy, fake_rest):
+    """默认（ladder_spread=False）保持原行为：只用最浅的几道支撑"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest, config={"max_steps": 3})
+    await _warm_higher(s, rising=True)
+    price = s._supports[0] - 1
+
+    assert s._planned_entries(price) == [price, s._supports[1], s._supports[2]]
+
+
+async def test_ladder_spread_still_spends_exactly_the_budget(make_strategy, fake_rest):
+    """铺开阶梯不能破坏「加满档打到止损恰好亏掉预算」这个不变量"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest,
+                      config={"max_steps": 3, "ladder_spread": True})
+    await _warm_higher(s, rising=True)
+    price = s._supports[0] - 1
+    await s._plan_round(price)
+
+    entries = s._planned_entries(price)
+    loss = sum(q * (e - s._stop_price) * CT_VAL
+               for q, e in zip(s._step_qty, entries, strict=True))
+    assert loss == pytest.approx(s._portfolio.get_total_equity() * s._risk_pct)
 
 
 async def test_round_rejected_when_leverage_exceeds_cap(make_strategy, fake_rest):

@@ -31,7 +31,12 @@
   max_hold_bars      满档后最多滞留多少根主时框K线，超时离场，默认 200
   trend_filter       是否要求高时框均线向上才开新一轮，默认 true
   ema_fast/ema_slow  趋势判定用的高时框均线周期，默认 21 / 55
+  trend_max_margin   快线领先慢线的**上限**（如 0.02 = 2%），默认 None 不设限。
+                     领先太多说明价格刚跑完一段，此时接回调接的是动能衰竭
   first_entry_at_support  首仓是否也要等回调到第一道支撑，默认 true
+  ladder_spread      加仓档位是否均匀铺满整个支撑区间（末档落在前低、紧挨止损），
+                     默认 false = 只用最浅的几道支撑。false 时加仓射程远短于
+                     止损射程，中间一段满仓无摊薄
   atr_period         ATR 周期，默认 14
   atr_multiplier     加仓最小间隔 = ATR × 该系数，默认 1.2
   fib_lookback       计算支撑位回看的高时框K线数，默认 100
@@ -91,7 +96,14 @@ def plan_ladder(
 
     于是任何更早的档位，亏损都严格小于预算——保护强度随暴露单调，
     而不是像固定金额止损那样在浅档形同虚设、在满档一碰就停。
+
+    公式成立的前提是**每一档都在止损之上**。只校验加权总和为正是不够的：
+    支撑位过期时（建仓期间不刷新支撑，价格已经走远）可能出现「首仓在止损
+    下方、而更深的几档在止损上方」，正负相抵后 denom 仍为正，于是规划通过、
+    挂出一个高于入场价的止损——实盘会被交易所拒单或瞬间触发。
     """
+    if any(e <= stop_price for e in entries):
+        return []
     denom = sum(w * (e - stop_price) for w, e in zip(weights, entries, strict=True))
     if denom <= 0:
         return []
@@ -124,6 +136,8 @@ class PyramidStrategy(BaseStrategy):
         self._max_hold_bars: int = config.get("max_hold_bars", 200)
         self._trend_filter: bool = config.get("trend_filter", True)
         self._first_at_support: bool = config.get("first_entry_at_support", True)
+        self._ladder_spread: bool = config.get("ladder_spread", False)
+        self._trend_max_margin: float | None = config.get("trend_max_margin")
 
         # 止盈梯度**递减**：浅档子弹多、暴露低，扛得起等一个大波段；
         # 深档的目标是逃出来并重置，不是把利润最大化。
@@ -206,16 +220,28 @@ class PyramidStrategy(BaseStrategy):
             [high - diff * r for r in FIB_RATIOS] + [low], reverse=True
         )
 
+    def trend_margin(self) -> float:
+        """快线高于慢线的相对幅度。负数 = 快线在下方。"""
+        if not self._ema_slow.value:
+            return 0.0
+        return self._ema_fast.value / self._ema_slow.value - 1
+
     def _trend_ok(self) -> bool:
         """高时框均线向上才允许开新一轮。
 
         马丁最大的死法就是在下跌趋势里启动一整轮金字塔——这道过滤会让
         牛市里也错过一些机会，但它把「在单边下跌中加满档」这个最坏场景排除掉。
+
+        trend_max_margin 给这道闸门加一个**上界**：快线领先太多说明价格刚跑完
+        一段，此时「回调到第一道支撑」买的是动能衰竭而不是回调。本策略的结构
+        （跌到支撑买、涨够就卖）本质是均值回归，单边趋势的末端正是它的弱区。
         """
         if not self._trend_filter:
             return True
         if not (self._ema_fast.ready and self._ema_slow.ready):
             return False
+        if self._trend_max_margin is not None:
+            return 0 < self.trend_margin() <= self._trend_max_margin
         return self._ema_fast.value > self._ema_slow.value
 
     # ── 风险预算 → 仓位 ────────────────────────────────────────────────────────
@@ -228,8 +254,28 @@ class PyramidStrategy(BaseStrategy):
         return min(self._supports) - self._stop_atr_mult * self._atr.value
 
     def _planned_entries(self, first_price: float) -> list[float]:
-        """本轮计划的各档入场价：首仓在当前价，之后依次在各道支撑位。"""
-        return [first_price, *self._supports[1:self._max_steps]]
+        """本轮计划的各档入场价：首仓在当前价，之后依次落在各道支撑上。
+
+        ladder_spread=False（默认，原行为）取最浅的 max_steps-1 道支撑，
+        阶梯只覆盖前几档斐波那契回撤——而止损始终在最低支撑下方。
+        max_steps 越小这个错配越明显：加仓射程 −5%，止损射程 −15%，
+        中间 10 个百分点满仓无摊薄，回测里的滞留超时和止损都出在这一段。
+
+        ladder_spread=True 把 max_steps-1 道入场**均匀铺满整个支撑区间**，
+        末档落在最低支撑（前低）上，紧挨止损，让两个射程对齐。
+        """
+        rest = self._supports[1:]
+        if not rest:
+            return [first_price]
+        n = self._max_steps - 1
+        if n <= 0:
+            return [first_price]
+        if not self._ladder_spread or n >= len(rest):
+            return [first_price, *rest[:n]]
+        # 在 rest 上等距取 n 个点，末点固定为最低支撑
+        idx = [round(i * (len(rest) - 1) / (n - 1)) if n > 1 else len(rest) - 1
+               for i in range(n)]
+        return [first_price, *(rest[i] for i in dict.fromkeys(idx))]
 
     async def _plan_round(self, first_price: float) -> bool:
         """开新一轮前规划整个阶梯。返回 False 表示这轮不该开。"""
@@ -397,6 +443,15 @@ class PyramidStrategy(BaseStrategy):
                 self._note = (
                     f"空仓等待｜趋势过滤：{self._higher_tf} 均线未就绪 "
                     f"(EMA{self._ema_fast.period}/EMA{self._ema_slow.period})"
+                )
+            elif (self._trend_max_margin is not None
+                    and self.trend_margin() > self._trend_max_margin):
+                self._note = (
+                    f"空仓等待｜趋势过热：{self._higher_tf} 快线领先慢线 "
+                    f"{self.trend_margin():.2%} > 上限 {self._trend_max_margin:.2%}"
+                    f"（EMA{self._ema_fast.period}={self._ema_fast.value:.4f} / "
+                    f"EMA{self._ema_slow.period}={self._ema_slow.value:.4f}）"
+                    f"，此时接回调多半是接动能衰竭"
                 )
             else:
                 self._note = (

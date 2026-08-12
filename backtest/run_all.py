@@ -235,26 +235,11 @@ async def run_one(
             inst_type=inst_type,
         )
 
-        # 构建高时框参数（按 extra_tf_configs 的 (tf, warm) 顺序）
-        h1_candles: list = []
-        h4_candles: list = []
-        warm_h1 = warm_h4 = 0
-
-        for tf, tf_warm in extra_tfs:
-            if "4H" in tf or "4h" in tf:
-                h4_candles = extra_candles.get(tf, [])
-                warm_h4 = tf_warm
-            elif "1H" in tf or "1h" in tf:
-                h1_candles = extra_candles.get(tf, [])
-                warm_h1 = tf_warm
-
         await engine.run(
-            candles_m15=candles_primary,
-            candles_h1=h1_candles,
-            candles_h4=h4_candles,
-            warm_up_m15=warm_primary,
-            warm_up_h1=warm_h1,
-            warm_up_h4=warm_h4,
+            candles_primary=candles_primary,
+            extra_candles=extra_candles,
+            warm_up_primary=warm_primary,
+            warm_up_extra=dict(extra_tfs),
         )
     except Exception as e:
         tb = traceback.format_exc()

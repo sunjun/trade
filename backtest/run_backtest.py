@@ -136,14 +136,6 @@ async def run(args: argparse.Namespace) -> None:
         return
 
     # ── 构建并运行回测引擎 ────────────────────────────────────────────────────
-    h1_candles, h4_candles = [], []
-    warm_h1 = warm_h4 = 0
-    for tf, tf_warm in extra_tfs:
-        if "4H" in tf:
-            h4_candles, warm_h4 = extra_candles.get(tf, []), tf_warm
-        elif "1H" in tf:
-            h1_candles, warm_h1 = extra_candles.get(tf, []), tf_warm
-
     engine = BacktestEngine(
         strategy_cls=strategy_cls,
         strategy_name=args.strategy,
@@ -155,12 +147,10 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     await engine.run(
-        candles_m15=candles_primary,
-        candles_h1=h1_candles,
-        candles_h4=h4_candles,
-        warm_up_m15=warm_primary,
-        warm_up_h1=warm_h1,
-        warm_up_h4=warm_h4,
+        candles_primary=candles_primary,
+        extra_candles=extra_candles,
+        warm_up_primary=warm_primary,
+        warm_up_extra=dict(extra_tfs),
     )
 
     # ── 输出目录 ──────────────────────────────────────────────────────────────

@@ -331,50 +331,43 @@ class BacktestEngine:
 
     async def run(
         self,
-        candles_m15: list[Candle],
-        candles_h1: list[Candle],
-        candles_h4: list[Candle],
-        warm_up_m15: int = 0,
-        warm_up_h1: int = 0,
-        warm_up_h4: int = 0,
+        candles_primary: list[Candle],
+        extra_candles: dict[str, list[Candle]] | None = None,
+        warm_up_primary: int = 0,
+        warm_up_extra: dict[str, int] | None = None,
     ) -> None:
         """执行回测主循环。
 
-        warm_up_* 参数指定各时框用于预热的根数（不计入回测期）。
-        若为 0 则自动使用策略的 warm_up_period（15m）及 extra_tf_configs（1H/4H）计算默认值。
+        candles_primary  策略主执行时框的 K 线（timeframe 配的那个，不一定是 15m）
+        extra_candles    {时框 -> K线}，键取自策略的 extra_tf_configs，任意时框都行
+        warm_up_*        用于预热的根数（不计入回测期）；为 0/缺失时按策略自己声明的算
+
+        高时框按 extra_tf_configs 解析——与实盘引擎 strategy_engine._setup_strategy
+        走同一套约定。此前这里把时框硬编码成 "4H"/"1H" 两个槽位，配 1D 的策略会被
+        静默丢弃数据（只打一条 WARNING），跑出 0 笔交易的空报告。
         """
         strategy = self._strategy
+        extra_candles = extra_candles or {}
+        warm_up_extra = dict(warm_up_extra or {})
 
         # ── 计算预热根数 ──────────────────────────────────────────────────────
-        if warm_up_m15 == 0:
-            warm_up_m15 = strategy.warm_up_period + 10
+        if warm_up_primary == 0:
+            warm_up_primary = strategy.warm_up_period + 10
 
-        # 高时框回调按 extra_tf_configs 解析——与实盘引擎（strategy_engine
-        # ._setup_strategy）走同一套约定。此前这里硬编码 `_handle_h4` /
-        # `_handle_h1` 方法名，只有 MtfTrendStrategy 能对上，其他多时框策略
-        # 在回测里根本收不到高时框K线。
-        handlers: dict[str, Callable] = {}   # "4H"/"1H" -> handler
+        handlers: dict[str, Callable] = {}   # 时框 -> handler
         for tf, tf_warm, handler in getattr(strategy, "extra_tf_configs", []):
-            if "4H" in tf:
-                handlers["4H"] = handler
-                warm_up_h4 = warm_up_h4 or tf_warm + 5
-            elif "1H" in tf:
-                handlers["1H"] = handler
-                warm_up_h1 = warm_up_h1 or tf_warm + 5
-            else:
-                logger.warning(f"回测暂不支持 {tf} 时框，该时框的数据不会被喂入")
+            handlers[tf] = handler
+            warm_up_extra[tf] = warm_up_extra.get(tf) or tf_warm + 5
+            if tf not in extra_candles:
+                logger.warning(f"策略声明了 {tf} 时框但没有提供该时框数据，将收不到K线")
 
-        logger.info(
-            f"Warm-up: 4H={warm_up_h4}, 1H={warm_up_h1}, 15m={warm_up_m15}"
-        )
+        warm_desc = ", ".join(f"{tf}={warm_up_extra.get(tf, 0)}" for tf in handlers)
+        logger.info(f"Warm-up: {warm_desc}{', ' if warm_desc else ''}"
+                    f"主时框={warm_up_primary}")
 
         # ── 预热高时框 ────────────────────────────────────────────────────────
-        for tf, candles, warm_n in (("4H", candles_h4, warm_up_h4),
-                                    ("1H", candles_h1, warm_up_h1)):
-            handler = handlers.get(tf)
-            if handler is None:
-                continue
-            warm = candles[:warm_n]
+        for tf, handler in handlers.items():
+            warm = extra_candles.get(tf, [])[:warm_up_extra.get(tf, 0)]
             logger.info(f"Warming up {len(warm)} x {tf} candles...")
             for c in warm:
                 c.confirmed = True
@@ -382,51 +375,55 @@ class BacktestEngine:
             if hasattr(strategy, "on_extra_tf_warmed"):
                 strategy.on_extra_tf_warmed(tf)
 
-        # ── 预热 15m ──────────────────────────────────────────────────────────
-        m15_warm = candles_m15[:warm_up_m15]
-        logger.info(f"Warming up {len(m15_warm)} x 15m candles...")
-        for c in m15_warm:
+        # ── 预热主时框 ────────────────────────────────────────────────────────
+        primary_warm = candles_primary[:warm_up_primary]
+        logger.info(f"Warming up {len(primary_warm)} x 主时框 candles...")
+        for c in primary_warm:
             c.confirmed = True
             await strategy.on_candle(c)
         strategy._warm_up_done = True
         strategy.reset_position_state()
 
         # ── 正式回测 ──────────────────────────────────────────────────────────
-        m15_bt = candles_m15[warm_up_m15:]
-        h1_bt  = candles_h1[warm_up_h1:]
-        h4_bt  = candles_h4[warm_up_h4:]
+        primary_bt = candles_primary[warm_up_primary:]
+        # 每个高时框各自的回测段与游标（用于判断某个主时框时刻之前
+        # 有没有新闭合的高时框 K 线）
+        extra_bt = {
+            tf: extra_candles.get(tf, [])[warm_up_extra.get(tf, 0):]
+            for tf in handlers
+        }
+        extra_idx = dict.fromkeys(handlers, 0)
 
-        # 构建 1H / 4H 的 ts 索引（用于判断某 15m 时刻之前有没有新闭合的高时框 K 线）
-        h1_idx = 0
-        h4_idx = 0
+        if not primary_bt:
+            logger.error(
+                f"预热用掉 {warm_up_primary} 根，主时框只有 {len(candles_primary)} 根，"
+                f"回测期为空——加大 --max-bars 或换一个预热需求更小的策略"
+            )
+            return
 
         logger.info(
-            f"Backtesting {len(m15_bt)} x 15m candles "
-            f"({m15_bt[0].ts.strftime('%Y-%m-%d')} → {m15_bt[-1].ts.strftime('%Y-%m-%d')})"
+            f"Backtesting {len(primary_bt)} x 主时框 candles "
+            f"({primary_bt[0].ts.strftime('%Y-%m-%d')} → "
+            f"{primary_bt[-1].ts.strftime('%Y-%m-%d')})"
         )
 
-        for i, candle in enumerate(m15_bt):
+        for i, candle in enumerate(primary_bt):
             # 更新当前价格（供 MockRest 使用）
             self._rest.set_current_candle(candle)
 
-            # 先喂已闭合的 4H K 线（ts <= 当前 15m 开盘时间）
-            while h4_idx < len(h4_bt) and h4_bt[h4_idx].ts <= candle.ts:
-                h4_bt[h4_idx].confirmed = True
-                if "4H" in handlers:
-                    await handlers["4H"]([h4_bt[h4_idx]])
-                h4_idx += 1
-
-            # 先喂已闭合的 1H K 线
-            while h1_idx < len(h1_bt) and h1_bt[h1_idx].ts <= candle.ts:
-                h1_bt[h1_idx].confirmed = True
-                if "1H" in handlers:
-                    await handlers["1H"]([h1_bt[h1_idx]])
-                h1_idx += 1
+            # 先喂各高时框已闭合的 K 线（ts <= 当前主时框开盘时间）
+            for tf, handler in handlers.items():
+                bars, idx = extra_bt[tf], extra_idx[tf]
+                while idx < len(bars) and bars[idx].ts <= candle.ts:
+                    bars[idx].confirmed = True
+                    await handler([bars[idx]])
+                    idx += 1
+                extra_idx[tf] = idx
 
             # 止损检查：在喂 K 线前先判断本根是否触及止损
             await self._check_stop_loss(candle)
 
-            # 喂 15m K 线给策略（策略内部会调用 _execute_signal → place_order）
+            # 喂主时框 K 线给策略（策略内部会调用 _execute_signal → place_order）
             candle.confirmed = True
             signals = await strategy.on_candle(candle)
             for sig in signals:
@@ -461,10 +458,16 @@ class BacktestEngine:
         hit = False
         sl_price = sl
 
+        # 成交价必须落在本根 K 线的可达区间内。止损价已经被跳过（跳空，或状态
+        # 里残留了过期的止损价）时，真实成交只能发生在开盘价，绝不可能拿到那个
+        # 更有利的止损价——不夹这一下，一个高于市价的多头止损会以高价"成交"，
+        # 凭空产生利润（实测能刷出 +11723% 的假收益）。
         if pos["pos_side"] == "long" and candle.low <= sl:
             hit = True
+            sl_price = min(sl, candle.open)
         elif pos["pos_side"] == "short" and candle.high >= sl:
             hit = True
+            sl_price = max(sl, candle.open)
 
         if not hit:
             return
