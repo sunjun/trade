@@ -263,7 +263,7 @@ class OKXWebSocketClient:
                 try:
                     await cb(parsed)
                 except Exception as e:
-                    logger.error(f"Callback error [{key}]: {e}", exc_info=True)
+                    logger.opt(exception=True).error(f"Callback error [{key}]: {e}")
             queue.task_done()
 
     # ── 消息解析 ──────────────────────────────────────────────────────────────

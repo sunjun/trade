@@ -13,6 +13,9 @@ from gateway.precision import round_qty
 # clOrdId 中标识策略的前缀长度（8 位可读名 + 4 位哈希）
 CLIENT_TAG_LEN = 12
 
+# 未收盘K线的行情心跳最小间隔（秒）
+TICK_LOG_INTERVAL = 60.0
+
 
 def make_client_tag(strategy_name: str) -> str:
     """由策略名生成固定 12 字符的 clOrdId 前缀。
@@ -59,6 +62,7 @@ class BaseStrategy(ABC):
 
         self.client_tag = make_client_tag(name)  # clOrdId 前缀，用于回推订单归属
         self._order_seq = 0
+        self._last_tick_log = 0.0    # 未收盘K线心跳的节流时间戳
 
     # ── 子类实现 ───────────────────────────────────────────────────────────────
 
@@ -75,6 +79,14 @@ class BaseStrategy(ABC):
 
     async def on_stop(self):
         """策略停止时的清理（可选override）"""
+
+    def decision_note(self) -> str:
+        """一句话说明「当前为什么没有下单」，用于日志排查（可选override）。
+
+        引擎在每根收盘K线无信号时、以及行情心跳里打印这句话。
+        默认实现返回空串（该策略未提供诊断信息）。
+        """
+        return ""
 
     def reset_position_state(self):
         """重置策略内部持仓状态机为 FLAT（预热结束或外部强制平仓后调用）。
@@ -166,12 +178,53 @@ class BaseStrategy(ABC):
         """
         for candle in candles:
             if not candle.confirmed:
+                self._log_tick(candle)
                 continue
+
+            tf = self.config.get("timeframe", "?")
+            logger.info(
+                f"[{self.name}] 📊 收盘K线 {self.symbol} {tf} "
+                f"O={candle.open} H={candle.high} L={candle.low} C={candle.close} "
+                f"V={candle.volume} ts={candle.ts:%m-%d %H:%M}"
+            )
+
             signals = await self.on_candle(candle)
+
             if not self._warm_up_done:
+                if signals:
+                    logger.info(
+                        f"[{self.name}] 预热期内产生 {len(signals)} 个信号，已丢弃不执行"
+                    )
                 continue
+
+            if not signals:
+                note = self.decision_note()
+                logger.info(
+                    f"[{self.name}] 本根K线不交易"
+                    + (f"｜{note}" if note else "｜（策略未提供诊断信息）")
+                )
+                continue
+
             for signal in signals:
                 await self._execute_signal(signal)
+
+    def _log_tick(self, candle: Candle):
+        """未收盘K线的行情心跳。
+
+        OKX 在一根K线未收盘期间会随成交不断推送，全打出来会淹没日志；
+        但完全不打，主时框是 15m/1H 时启动后十几分钟内日志一片空白，
+        看不出行情到底有没有进来。所以这里按 TICK_LOG_INTERVAL 节流。
+        """
+        now = time.monotonic()
+        if now - self._last_tick_log < TICK_LOG_INTERVAL:
+            return
+        self._last_tick_log = now
+        note = self.decision_note() if self._warm_up_done else "预热中"
+        logger.info(
+            f"[{self.name}] ⏳ {self.symbol} 最新价 {candle.close} "
+            f"(本根未收盘 O={candle.open} H={candle.high} L={candle.low})"
+            + (f"｜{note}" if note else "")
+        )
 
     async def _execute_signal(self, signal: Signal):
         """经过风控检查后下单"""
@@ -186,21 +239,37 @@ class BaseStrategy(ABC):
             logger.warning(f"[{self.name}] Signal BLOCKED by risk: {reason}")
             return
 
-        qty = await self._calc_qty(signal)
+        raw_qty = await self._calc_qty(signal)
+        qty = raw_qty
         if not signal.reduce_only:
-            qty = await self._cap_by_max_position(signal, qty)
+            qty = await self._cap_by_max_position(signal, raw_qty)
+            if qty != raw_qty:
+                logger.warning(
+                    f"[{self.name}] 张数被全局仓位闸门截断：{raw_qty} → {qty} "
+                    f"(RISK__MAX_POSITION_PCT={self._risk.max_position_pct:.0%})"
+                )
         if qty <= 0:
             avail = self._portfolio.get_available("USDT")
+            equity = self._portfolio.get_total_equity()
+            info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
             logger.warning(
-                f"[{self.name}] Signal SKIPPED: qty=0 "
-                f"(available={avail:.2f} USDT, position_size_pct={self.config.get('position_size_pct')})"
+                f"[{self.name}] 信号被跳过：可下张数为 0（策略算出 {raw_qty}，闸门后 {qty}）"
+                f"｜可用 {avail:.2f} / 权益 {equity:.2f} USDT"
+                f"｜交易所最小下单量 minSz={info.min_sz} lotSz={info.lot_sz}"
+                f"｜常见原因：资金不足、算出的量低于 minSz、"
+                f"或已达 max_position_pct({self._risk.max_position_pct:.0%}) 名义上限"
             )
             return
         signal.qty = qty
 
+        ticker = await self._rest.get_ticker(signal.inst_id)
+        info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
+        notional = qty * info.ct_val * ticker.last
         logger.info(
-            f"[{self.name}] Placing order: {signal.side.value.upper()} "
-            f"{qty} {signal.inst_id} @ MARKET"
+            f"[{self.name}] 下单中：{signal.side.value.upper()} "
+            f"{qty} 张 {signal.inst_id} @ MARKET(现价 {ticker.last}) "
+            f"≈ {notional:.2f} USDT 名义"
+            + (f"，止损 {signal.stop_loss}" if signal.stop_loss else "")
         )
         # 开仓信号下单失败时要回滚本地状态，避免策略以为已开仓
         is_open_signal = not signal.reduce_only

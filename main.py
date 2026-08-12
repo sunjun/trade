@@ -2,6 +2,7 @@
 import asyncio
 import signal
 import sys
+import traceback
 
 from loguru import logger
 
@@ -68,11 +69,20 @@ async def main():
 if __name__ == "__main__":
     import os
     os.makedirs("logs", exist_ok=True)
+    code = 0
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+    except BaseException:
+        # 必须在这里打完整栈：下面 finally 里的 os._exit 会直接终止进程，
+        # 连解释器默认的 traceback 都来不及打，异常退出会表现为「静默退出码 0」
+        traceback.print_exc()
+        logger.opt(exception=True).critical("Engine crashed with an unhandled exception")
+        code = 1
     finally:
-        # Windows 上 aiohttp/websockets 的网络清理线程会阻塞正常退出，
+        # aiohttp/websockets 的网络清理线程会阻塞正常退出，
         # 引擎已完成 stop() 清理，直接强制终止进程。
-        os._exit(0)
+        logger.complete()          # 强杀前把日志 sink 的缓冲刷干净
+        sys.stderr.flush()
+        os._exit(code)

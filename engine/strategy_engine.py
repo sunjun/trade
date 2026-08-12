@@ -17,6 +17,9 @@ from gateway.okx_rest import OKXRestClient
 from gateway.okx_ws import OKXWebSocketClient
 from storage.db import Database
 
+# 持仓推送的打印节流间隔（秒）——有仓位时该频道会持续推送
+POSITION_LOG_INTERVAL = 60.0
+
 
 class StrategyEngine:
     def __init__(self, settings: Settings):
@@ -42,6 +45,7 @@ class StrategyEngine:
         self._strategy_by_tag: dict[str, Any] = {}  # clOrdId 前缀 -> 策略
         self._tasks: list[asyncio.Task] = []
         self._running = False
+        self._last_pos_log: dict[str, float] = {}  # 持仓打印节流
 
     # ── 启动 / 停止 ────────────────────────────────────────────────────────────
 
@@ -75,10 +79,12 @@ class StrategyEngine:
                     self._warn_if_risk_limits_too_tight(strategy)
                     await self._setup_strategy(strategy)
                 except Exception as e:
-                    logger.error(
+                    # loguru 没有 exc_info 参数——传了会被当成格式化实参，
+                    # 而消息里带 JSON 花括号时 str.format 直接抛 KeyError，
+                    # 整个错误处理分支反而变成静默崩溃。用 opt(exception=True)。
+                    logger.opt(exception=True).error(
                         f"[{strategy.name}] Setup failed, removing from active strategies: "
-                        f"{type(e).__name__}: {e}",
-                        exc_info=True,
+                        f"{type(e).__name__}: {e}"
                     )
                     failed.append(strategy)
             for s in failed:
@@ -153,7 +159,9 @@ class StrategyEngine:
                 strategies.append(strategy)
                 logger.info(f"Loaded strategy: {strategy.name} [{strategy.symbol}]")
             except Exception as e:
-                logger.error(f"Failed to load strategy '{entry.get('name')}': {e}", exc_info=True)
+                logger.opt(exception=True).error(
+                    f"Failed to load strategy '{entry.get('name')}': {e}"
+                )
         return strategies
 
     def _instantiate_strategy(self, entry: dict) -> Any:
@@ -207,7 +215,13 @@ class StrategyEngine:
             await strategy.on_candle(candle)
         strategy._warm_up_done = True
         strategy.reset_position_state()   # 重置为 FLAT，避免预热期间的虚假信号污染状态机
-        logger.info(f"[{strategy.name}] Warm-up complete, state reset to FLAT")
+        last = candles[-1].close if candles else None
+        note = strategy.decision_note()
+        logger.info(
+            f"[{strategy.name}] 预热完成，状态重置为 FLAT"
+            + (f"｜{symbol} 最新收盘 {last}" if last is not None else "")
+            + (f"｜{note}" if note else "")
+        )
 
         # 预热后立刻接管交易所上已存在的持仓（进程重启/崩溃恢复）
         await self._adopt_existing_position(strategy)
@@ -320,16 +334,44 @@ class StrategyEngine:
 
     async def _on_order_update(self, orders: list[Order]):
         for order in orders:
+            filled = (
+                f"成交 {order.filled_qty}@{order.avg_fill_price}"
+                if order.filled_qty else "未成交"
+            )
+            logger.info(
+                f"📥 订单回报 {order.inst_id} {order.side.value.upper()} "
+                f"{order.pos_side.value} 状态={order.status.value} "
+                f"下单量={order.qty} {filled} "
+                f"id={order.order_id} clOrdId={order.client_order_id}"
+            )
             await self._portfolio.on_order_filled(order)
             strategy = self._strategy_for_order(order)
             if strategy is not None:
                 order.strategy_name = strategy.name
                 await strategy.on_order_update(order)
+            else:
+                logger.warning(
+                    f"订单 {order.order_id} 无法归属到任何策略，仅入库不回调"
+                )
             # 持久化（按 order_id 幂等 upsert，可能已在下单时写过一次）
             await self._db.save_order(order, order.strategy_name)
 
     async def _on_position_update(self, positions: list[Position]):
         await self._portfolio.on_position_update(positions)
+        # 持仓频道在有仓位时会持续推送，按品种节流打印，避免淹没日志
+        now = asyncio.get_running_loop().time()
+        for p in positions:
+            if p.size <= 0:
+                continue
+            key = f"{p.inst_id}:{p.pos_side.value}"
+            if now - self._last_pos_log.get(key, 0.0) < POSITION_LOG_INTERVAL:
+                continue
+            self._last_pos_log[key] = now
+            logger.info(
+                f"📈 持仓 {p.inst_id} {p.pos_side.value} {p.size} 张 "
+                f"开仓均价={p.entry_price} 标记价={p.mark_price} "
+                f"浮动盈亏={p.unrealized_pnl:+.2f} USDT 杠杆={p.leverage}x"
+            )
 
     # ── 后台循环 ───────────────────────────────────────────────────────────────
 
@@ -338,8 +380,15 @@ class StrategyEngine:
         while self._running:
             await asyncio.sleep(60)
             await self._portfolio.refresh(self._rest)
+            equity = self._portfolio.get_total_equity()
+            logger.info(
+                f"💰 账户刷新：权益 {equity:.2f} USDT｜可用 "
+                f"{self._portfolio.get_available('USDT'):.2f} USDT｜"
+                f"单品种名义上限 {equity * self._risk.max_position_pct:.2f} USDT "
+                f"({self._risk.max_position_pct:.0%})"
+            )
             # 驱动账户维度风控（高水位 / 回撤熔断 / 日亏损比例重算）
-            self._risk.on_equity_update(self._portfolio.get_total_equity())
+            self._risk.on_equity_update(equity)
             # 刷新后让每个策略用真实持仓修正本地状态（爆仓/外部平仓/交易所SL触发等）
             for strategy in self._strategies:
                 try:

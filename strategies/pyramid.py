@@ -160,6 +160,7 @@ class PyramidStrategy(BaseStrategy):
         self._stop_price = 0.0             # 本轮结构止损价
         self._bars_at_max = 0
         self._ct_val: float | None = None
+        self._note = "等待高时框预热完成"   # 「为什么没下单」，由各道闸门填写
 
     # ── 高时框：趋势、支撑位与 ATR ─────────────────────────────────────────────
 
@@ -274,10 +275,31 @@ class PyramidStrategy(BaseStrategy):
 
     # ── 主时框：触发检查 ───────────────────────────────────────────────────────
 
+    def decision_note(self) -> str:
+        return self._note
+
+    def _pos_note(self, close: float) -> str:
+        """持仓状态摘要：档位 / 均价 / 浮盈 / 本档止盈目标 / 结构止损。"""
+        if self._avg_entry <= 0:
+            return f"持仓 {self._step}/{self._max_steps} 档（均价未知）"
+        tp_rate = self._tp_schedule[max(self._step - 1, 0)]
+        tp = self._avg_entry * (1 + tp_rate)
+        return (
+            f"持仓 {self._step}/{self._max_steps} 档 {self._total_qty:.2f} 张"
+            f"｜均价 {self._avg_entry:.4f} 现价 {close:.4f} "
+            f"({close / self._avg_entry - 1:+.2%})"
+            f"｜止盈 {tp:.4f} (+{tp_rate:.1%}) 止损 {self._stop_price:.4f}"
+        )
+
     async def on_candle(self, candle: Candle) -> list[Signal]:
         if not candle.confirmed:
             return []
         if not (self._higher_warmed and self._atr.ready and self._supports):
+            self._note = (
+                f"高时框({self._higher_tf})尚未就绪："
+                f"warmed={self._higher_warmed} atr_ready={self._atr.ready} "
+                f"支撑位数={len(self._supports)}"
+            )
             return []
 
         close = candle.close
@@ -299,6 +321,12 @@ class PyramidStrategy(BaseStrategy):
             add = self._check_add(close)
             if add:
                 signals.append(add)
+        else:
+            self._note = (
+                f"{self._pos_note(close)}"
+                f"｜已满档，只等止盈/止损"
+                f"（滞留 {self._bars_at_max}/{self._max_hold_bars} 根K线）"
+            )
 
         await self._save(signals)
         return signals
@@ -365,10 +393,31 @@ class PyramidStrategy(BaseStrategy):
         却是唯一不看位置的一笔。
         """
         if not self._trend_ok():
+            if not (self._ema_fast.ready and self._ema_slow.ready):
+                self._note = (
+                    f"空仓等待｜趋势过滤：{self._higher_tf} 均线未就绪 "
+                    f"(EMA{self._ema_fast.period}/EMA{self._ema_slow.period})"
+                )
+            else:
+                self._note = (
+                    f"空仓等待｜趋势过滤未通过：{self._higher_tf} "
+                    f"EMA{self._ema_fast.period}={self._ema_fast.value:.4f} ≤ "
+                    f"EMA{self._ema_slow.period}={self._ema_slow.value:.4f}"
+                    f"（差 {self._ema_slow.value - self._ema_fast.value:.4f}，需快线上穿）"
+                )
             return None
         if self._first_at_support and close > self._supports[0]:
+            self._note = (
+                f"空仓等待｜趋势向上，但现价 {close:.4f} 高于第一道支撑 "
+                f"{self._supports[0]:.4f}，还需回调 "
+                f"{close / self._supports[0] - 1:.2%} 才建首仓"
+            )
             return None
         if not await self._plan_round(close):
+            self._note = (
+                f"空仓等待｜已到支撑 {self._supports[0]:.4f}，"
+                f"但本轮阶梯规划被否决（详见上一条日志）"
+            )
             return None
 
         logger.info(
@@ -384,7 +433,21 @@ class PyramidStrategy(BaseStrategy):
         min_gap = self._atr.value * self._atr_mult
         atr_trigger = self._last_entry_price - min_gap
 
-        if close > target_support or close > atr_trigger:
+        if close > target_support:
+            self._note = (
+                f"{self._pos_note(close)}"
+                f"｜下一档({self._step + 1}/{self._max_steps})需先跌至支撑 "
+                f"{target_support:.4f}（还差 {close / target_support - 1:.2%}）"
+            )
+            return None
+        if close > atr_trigger:
+            self._note = (
+                f"{self._pos_note(close)}"
+                f"｜已触及支撑 {target_support:.4f}，但距上次成交 "
+                f"{self._last_entry_price:.4f} 只回落 {self._last_entry_price - close:.4f}"
+                f" < 最小间隔 {min_gap:.4f} (ATR {self._atr.value:.4f} × {self._atr_mult})"
+                f"，跌到 {atr_trigger:.4f} 才加仓"
+            )
             return None
 
         logger.info(
