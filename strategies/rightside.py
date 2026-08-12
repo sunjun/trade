@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from config.tz import fmt_ts
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
     Candle,
@@ -138,7 +139,7 @@ class RightSideStrategy(BaseStrategy):
                 f"uPnL={pnl:+.4f}"
             )
         logger.debug(
-            f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
+            f"[{self.name}] {fmt_ts(candle.ts)} [{tf}] "
             f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
             f"V={volume:.2f}(avg={vma:.2f}) | "
             f"EMA{self._ema_fast.period}={ef:.4f} EMA{self._ema_slow.period}={es:.4f} "

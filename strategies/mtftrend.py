@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from config.tz import fmt_ts
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
     Candle,
@@ -354,7 +355,7 @@ class MtfTrendStrategy(BaseStrategy):
                        f"sl={self._state.stop_loss:.4f} uPnL={pnl:+.4f}")
 
         logger.debug(
-            f"[{self.name}][15M] {candle.ts.strftime('%m-%d %H:%M')} "
+            f"[{self.name}][15M] {fmt_ts(candle.ts)} "
             f"C={close:.4f} V={vol:.0f}(ma={vol_ma:.0f})  "
             f"EMA{self._m15.ema_fast.period}={ef:.4f} "
             f"EMA{self._m15.ema_slow.period}={es:.4f}  "

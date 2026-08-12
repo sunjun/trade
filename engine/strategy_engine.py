@@ -17,8 +17,13 @@ from gateway.okx_rest import OKXRestClient
 from gateway.okx_ws import OKXWebSocketClient
 from storage.db import Database
 
-# 持仓推送的打印节流间隔（秒）——有仓位时该频道会持续推送
-POSITION_LOG_INTERVAL = 60.0
+# 账户状态的 REST 全量刷新间隔（秒）——风控和持仓对齐依赖它，不能放慢
+PORTFOLIO_REFRESH_INTERVAL = 60.0
+
+# 持仓 / 账户的打印节流间隔（秒）。刷新照旧每分钟做，只是没必要每分钟都打一行：
+# 有仓位时持仓频道会持续推送，权益也基本不动，一小时一条足够看趋势。
+POSITION_LOG_INTERVAL = 3600.0
+EQUITY_LOG_INTERVAL = 3600.0
 
 
 class StrategyEngine:
@@ -45,7 +50,9 @@ class StrategyEngine:
         self._strategy_by_tag: dict[str, Any] = {}  # clOrdId 前缀 -> 策略
         self._tasks: list[asyncio.Task] = []
         self._running = False
-        self._last_pos_log: dict[str, float] = {}  # 持仓打印节流
+        # 打印节流的上次时间戳；None = 还没打过，下次一定打
+        self._last_pos_log: dict[str, float] = {}
+        self._last_equity_log: float | None = None
 
     # ── 启动 / 停止 ────────────────────────────────────────────────────────────
 
@@ -364,7 +371,8 @@ class StrategyEngine:
             if p.size <= 0:
                 continue
             key = f"{p.inst_id}:{p.pos_side.value}"
-            if now - self._last_pos_log.get(key, 0.0) < POSITION_LOG_INTERVAL:
+            last = self._last_pos_log.get(key)
+            if last is not None and now - last < POSITION_LOG_INTERVAL:
                 continue
             self._last_pos_log[key] = now
             logger.info(
@@ -376,17 +384,25 @@ class StrategyEngine:
     # ── 后台循环 ───────────────────────────────────────────────────────────────
 
     async def _portfolio_refresh_loop(self):
-        """每 60 秒通过 REST 全量刷新账户状态，并让各策略对齐本地持仓视图"""
+        """每 60 秒通过 REST 全量刷新账户状态，并让各策略对齐本地持仓视图。
+
+        刷新频率不能降——风控熔断和持仓对齐都靠它；只是打印按小时节流。
+        """
         while self._running:
-            await asyncio.sleep(60)
+            await asyncio.sleep(PORTFOLIO_REFRESH_INTERVAL)
             await self._portfolio.refresh(self._rest)
             equity = self._portfolio.get_total_equity()
-            logger.info(
-                f"💰 账户刷新：权益 {equity:.2f} USDT｜可用 "
-                f"{self._portfolio.get_available('USDT'):.2f} USDT｜"
-                f"单品种名义上限 {equity * self._risk.max_position_pct:.2f} USDT "
-                f"({self._risk.max_position_pct:.0%})"
-            )
+            now = asyncio.get_running_loop().time()
+            if self._last_equity_log is None or now - self._last_equity_log >= EQUITY_LOG_INTERVAL:
+                self._last_equity_log = now
+                logger.info(
+                    f"💰 账户：权益 {equity:.2f} USDT｜可用 "
+                    f"{self._portfolio.get_available('USDT'):.2f} USDT｜"
+                    f"单品种名义上限 {equity * self._risk.max_position_pct:.2f} USDT "
+                    f"({self._risk.max_position_pct:.0%})"
+                )
+            else:
+                logger.debug(f"账户刷新：权益 {equity:.2f} USDT")
             # 驱动账户维度风控（高水位 / 回撤熔断 / 日亏损比例重算）
             self._risk.on_equity_update(equity)
             # 刷新后让每个策略用真实持仓修正本地状态（爆仓/外部平仓/交易所SL触发等）

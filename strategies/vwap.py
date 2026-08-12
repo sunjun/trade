@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from config.tz import fmt_ts
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
     Candle,
@@ -99,7 +100,7 @@ class VwapStrategy(BaseStrategy):
             f"{self._state.pos_side.value.upper()} entry={self._state.entry_price:.4f} sl={self._state.stop_loss:.4f}"
         )
         logger.debug(
-            f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] C={close:.4f} | "
+            f"[{self.name}] {fmt_ts(candle.ts)} [{tf}] C={close:.4f} | "
             f"VWAP={vwap:.4f} bands=[{lower:.4f},{upper:.4f}] "
             f"RSI={rsi:.1f} ATR={atr:.4f} | {pos_str}"
         )

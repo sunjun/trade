@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from config.tz import fmt_ts
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
     Candle,
@@ -81,7 +82,7 @@ class GridStrategy(BaseStrategy):
         zone = self._zone(close)
 
         logger.debug(
-            f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] C={close:.4f} | "
+            f"[{self.name}] {fmt_ts(candle.ts)} [{tf}] C={close:.4f} | "
             f"zone={zone}/{self._n_grids} "
             f"longs={len(self._long_slots)} shorts={len(self._short_slots)} "
             f"levels=[{self._levels[0]:.2f}..{self._levels[-1]:.2f}]"

@@ -1,7 +1,9 @@
 """程序入口——启动策略引擎"""
 import asyncio
+import os
 import signal
 import sys
+import time
 import traceback
 
 from loguru import logger
@@ -11,11 +13,16 @@ from engine.strategy_engine import StrategyEngine
 
 
 def _setup_logging():
+    # loguru 的 {time} 取进程本地时区；服务器多半是 UTC，这里统一钉到东八区，
+    # 否则日志时间和你看盘的时间差 8 小时。（内部存储仍然是 UTC）
+    os.environ["TZ"] = "Asia/Shanghai"
+    time.tzset()
+
     logger.remove()
     logger.add(
         sys.stderr,
         level=settings.log_level,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
+        format="<green>{time:MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
     )
     logger.add(
         "logs/trade_{time:YYYY-MM-DD}.log",
@@ -67,7 +74,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    import os
     os.makedirs("logs", exist_ok=True)
     code = 0
     try:

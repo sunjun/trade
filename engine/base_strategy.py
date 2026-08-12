@@ -7,14 +7,25 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from config.tz import fmt_ts
 from gateway.models import Candle, InstType, Order, Position, PosSide, Signal
 from gateway.precision import round_qty
 
 # clOrdId 中标识策略的前缀长度（8 位可读名 + 4 位哈希）
 CLIENT_TAG_LEN = 12
 
-# 未收盘K线的行情心跳最小间隔（秒）
-TICK_LOG_INTERVAL = 60.0
+# 时框字符串识别不出来时，行情心跳的兜底间隔（秒）
+DEFAULT_TICK_LOG_INTERVAL = 900.0
+
+_TF_UNIT_SECONDS = {"m": 60, "H": 3600, "D": 86400, "W": 604800, "M": 2592000}
+
+
+def timeframe_seconds(tf: str) -> float | None:
+    """把 OKX 的时框字符串（1m/15m/4H/1D…）换算成秒，识别不了返回 None。"""
+    m = re.fullmatch(r"(\d+)([mHDWM])", tf.strip())
+    if not m:
+        return None
+    return int(m.group(1)) * _TF_UNIT_SECONDS[m.group(2)]
 
 
 def make_client_tag(strategy_name: str) -> str:
@@ -62,7 +73,12 @@ class BaseStrategy(ABC):
 
         self.client_tag = make_client_tag(name)  # clOrdId 前缀，用于回推订单归属
         self._order_seq = 0
-        self._last_tick_log = 0.0    # 未收盘K线心跳的节流时间戳
+        # 未收盘K线心跳的节流：策略只在收线那一刻才判断要不要交易，
+        # 所以心跳按主时框的节奏打就够了（15m 策略 = 每 15 分钟一条）
+        self._last_tick_log: float | None = None   # None = 还没打过，下次一定打
+        self._tick_log_interval = (
+            timeframe_seconds(str(config.get("timeframe", ""))) or DEFAULT_TICK_LOG_INTERVAL
+        )
 
     # ── 子类实现 ───────────────────────────────────────────────────────────────
 
@@ -185,7 +201,7 @@ class BaseStrategy(ABC):
             logger.info(
                 f"[{self.name}] 📊 收盘K线 {self.symbol} {tf} "
                 f"O={candle.open} H={candle.high} L={candle.low} C={candle.close} "
-                f"V={candle.volume} ts={candle.ts:%m-%d %H:%M}"
+                f"V={candle.volume} ts={fmt_ts(candle.ts)}"
             )
 
             signals = await self.on_candle(candle)
@@ -213,10 +229,11 @@ class BaseStrategy(ABC):
 
         OKX 在一根K线未收盘期间会随成交不断推送，全打出来会淹没日志；
         但完全不打，主时框是 15m/1H 时启动后十几分钟内日志一片空白，
-        看不出行情到底有没有进来。所以这里按 TICK_LOG_INTERVAL 节流。
+        看不出行情到底有没有进来。策略本身也只在收线时才做判断，
+        所以这里按主时框长度节流：启动后立刻打一条，之后每根K线一条。
         """
         now = time.monotonic()
-        if now - self._last_tick_log < TICK_LOG_INTERVAL:
+        if self._last_tick_log is not None and now - self._last_tick_log < self._tick_log_interval:
             return
         self._last_tick_log = now
         note = self.decision_note() if self._warm_up_done else "预热中"
