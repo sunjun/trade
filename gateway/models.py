@@ -82,6 +82,7 @@ class Order:
     strategy_name: str = ""
     stop_loss: float | None = None   # 交易所侧附加止损触发价（OKX attachAlgoOrds）
     reduce_only: bool = False        # True = 平仓/减仓腿
+    reason: str = ""                 # 触发本单的策略理由，原样取自 Signal.reason
     # 平仓/减仓腿的已实现盈亏（USDT）。开仓腿为 None——开仓不产生已实现盈亏。
     # 由 BaseStrategy._execute_signal 在下单前按持仓快照填入，用于日内盈亏统计。
     realized_pnl: float | None = None

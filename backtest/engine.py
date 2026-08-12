@@ -227,6 +227,7 @@ class BacktestRest:
             action = f"open_{pos_side}"
             self.trades.append(TradeRecord(
                 ts=ts, action=action, price=price, contracts=contracts,
+                reason=order.reason,
             ))
         else:
             # 平仓/减仓：按信号给出的张数平，从持仓方向判断多空
@@ -243,7 +244,7 @@ class BacktestRest:
                 verb = "close" if closed >= held - 1e-9 else "reduce"
                 self.trades.append(TradeRecord(
                     ts=ts, action=f"{verb}_{pos_side}", price=price, contracts=closed,
-                    pnl=net_pnl, reason=getattr(order, "_reason", ""),
+                    pnl=net_pnl, reason=order.reason,
                 ))
 
         self._order_seq += 1

@@ -413,6 +413,7 @@ def _signal_to_order(signal: Signal, strategy_name: str) -> Order:
         strategy_name=strategy_name,
         stop_loss=signal.stop_loss,
         reduce_only=signal.reduce_only,
+        reason=signal.reason,
     )
 
 

@@ -127,15 +127,18 @@ async def _download_backward(
     bar: str,
     max_candles: int,
     stop_after_ts: int | None = None,
+    start_after: int | None = None,
 ) -> list[Candle]:
     """
-    从最新时刻向历史分页下载，直到：
+    向历史方向分页下载，直到：
       - 达到 max_candles 根，或
-      - 拉到 stop_after_ts（含）之前（用于增量更新）
+      - 拉到 stop_after_ts（含）之前（用于增量更新），或
+      - 交易所没有更早的数据了
+    默认从最新时刻起翻；传 start_after 则从该时间戳往更早翻（用于回补历史）。
     返回升序列表。
     """
     all_rows: list[list] = []
-    after: int | None = None
+    after: int | None = start_after
     page = 0
 
     async with aiohttp.ClientSession() as session:
@@ -186,6 +189,20 @@ async def _download_backward(
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
+def _merge(*groups: list[Candle]) -> list[Candle]:
+    """按时间戳去重并升序合并多组 K 线。"""
+    seen: set[int] = set()
+    merged: list[Candle] = []
+    for group in groups:
+        for c in group:
+            ts_ms = int(c.ts.timestamp() * 1000)
+            if ts_ms not in seen:
+                seen.add(ts_ms)
+                merged.append(c)
+    merged.sort(key=lambda c: c.ts)
+    return merged
+
+
 async def fetch_all_candles(
     inst_id: str,
     timeframe: str,
@@ -234,23 +251,32 @@ async def fetch_all_candles(
         else:
             logger.info("Already up to date, no new candles")
 
-    # ── 合并 & 去重 ───────────────────────────────────────────────────────────
-    all_candles = cached + new_candles
-    seen: set = set()
-    merged: list[Candle] = []
-    for c in all_candles:
-        ts_ms = int(c.ts.timestamp() * 1000)
-        if ts_ms not in seen:
-            seen.add(ts_ms)
-            merged.append(c)
-    merged.sort(key=lambda c: c.ts)
+    merged = _merge(cached, new_candles)
+
+    # ── 回补更早的历史 ────────────────────────────────────────────────────────
+    # 缓存是上次用更小的 max_candles 建的时候，只做增量更新会永远停在旧的窗口
+    # 宽度上——调大 --max-bars 完全不起作用，而报告里看不出样本被截短了，
+    # 于是拿 1 个月的数据当 6 个月的结论用。
+    backfilled: list[Candle] = []
+    if not need_full and len(merged) < max_candles and merged:
+        missing = max_candles - len(merged)
+        logger.info(
+            f"Cache only has {len(merged)}/{max_candles} candles, "
+            f"backfilling {missing} older ones..."
+        )
+        oldest_ts = int(merged[0].ts.timestamp() * 1000)
+        backfilled = await _download_backward(
+            inst_id, bar, missing, start_after=oldest_ts
+        )
+        logger.info(f"Backfilled {len(backfilled)} older candles")
+        merged = _merge(backfilled, merged)
 
     # 截断到 max_candles（保留最新的）
     if len(merged) > max_candles:
         merged = merged[-max_candles:]
 
     # ── 保存更新后的缓存 ──────────────────────────────────────────────────────
-    if new_candles or need_full:
+    if new_candles or backfilled or need_full:
         _save_cache(path, merged)
         logger.info(f"Cache saved: {len(merged)} candles → {path}")
 
@@ -258,6 +284,13 @@ async def fetch_all_candles(
         f"Ready: {len(merged)} candles for {inst_id} {timeframe}  "
         f"({merged[0].ts.strftime('%Y-%m-%d')} → {merged[-1].ts.strftime('%Y-%m-%d')})"
     )
+    # 交易所的历史深度是有限的（15m 约 6 个月），说清楚实际拿到多少，
+    # 免得以为回测跑的是请求的那个区间
+    if len(merged) < max_candles:
+        logger.warning(
+            f"{inst_id} {timeframe} 只有 {len(merged)} 根（请求 {max_candles} 根）——"
+            f"交易所历史深度到此为止，回测区间比预期短"
+        )
     return merged
 
 

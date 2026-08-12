@@ -355,10 +355,18 @@ strategies:
     config:
       timeframe: "15m"
       higher_timeframe: "4H"
-      max_steps: 6
+      # 3 档而非 6 档：止损价永远钉在最低支撑下方（与 max_steps 无关），而阶梯
+      # 只铺到第 max_steps 道支撑。档数越多，深档越贴近止损、每张亏得越少，同样的
+      # 风险预算就买到越多张——弹药大半押在 0.786/前低这些极少成交的位置上，首档
+      # 反而小到被 lotSz 取整吃掉。3 档把预算集中在真正会成交的支撑上。
+      # 半年回测：年化 3.11% vs 6 档 1.55%，平均亏损 1.24 vs 4.00 USDT。
+      max_steps: 3
       pyramid_ratio: 1.3
-      risk_pct: 0.02
-      max_leverage: 0.25   # 满档名义 <= 权益 25%
+      # 单轮最坏亏损 1% 权益。不是 2%：max_leverage 0.25 这条闸门本身
+      # 就隐含了「实际风险 <= 0.25 × 止损距离%」≈ 1.1%，写 2% 兑现不了，
+      # 只会让 _plan_round 每轮都因满档杠杆超限而放弃。
+      risk_pct: 0.01
+      max_leverage: 0.25   # 满档名义 <= 权益 25%，与 RISK__MAX_POSITION_PCT 对齐
       # ETH 波动大于 BTC，止损缓冲放宽一档，避免在正常波动里被扫出去
       stop_atr_mult: 2.0
       tp_schedule: [0.060, 0.045, 0.035, 0.028, 0.022, 0.018]
