@@ -109,7 +109,7 @@ def _format_report_block(name: str, metrics: dict) -> str:
         f"  最大回撤:      {metrics['max_drawdown_pct']:>11.2f}%",
         f"  Sharpe 比率:   {metrics['sharpe']:>12.2f}",
         sep,
-        f"  交易次数:      {metrics['total_trades']:>12d}",
+        f"  平仓腿数:      {metrics['total_trades']:>12d}  (其中减仓 {metrics.get('reduce_legs', 0)})",
         f"  胜率:          {metrics['win_rate_pct']:>11.2f}%",
         f"  平均盈利:      {metrics['avg_win_usdt']:>12.2f} USDT",
         f"  平均亏损:      {metrics['avg_loss_usdt']:>12.2f} USDT",

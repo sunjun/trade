@@ -60,14 +60,16 @@ class BbRsiStrategy(BaseStrategy):
         self._can_short = (inst_type == InstType.SWAP)
 
     async def on_candle(self, candle: Candle) -> list[Signal]:
+        # 只用已收盘K线驱动指标：盘中推送会污染 BB/RSI/ATR
+        if not candle.confirmed:
+            return []
+
         close = candle.close
         self._bb.update(close)
         self._rsi.update(close)
         self._atr.update(candle.high, candle.low, close)
 
         if not (self._bb.ready and self._rsi.ready and self._atr.ready):
-            return []
-        if not candle.confirmed:
             return []
 
         tf = self.config.get("timeframe", "?")
@@ -172,7 +174,6 @@ class BbRsiStrategy(BaseStrategy):
                 f"[{self.name}] Order filled: {order.side.value} "
                 f"{order.filled_qty}@{order.avg_fill_price:.4f}"
             )
-            await self._db.save_order(order, self.name)
 
     async def on_stop(self):
         logger.info(f"[{self.name}] Stopped. {'flat' if self._state.flat else self._state.pos_side.value}")

@@ -1,4 +1,5 @@
 """OKX REST API v5 客户端"""
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -22,6 +23,27 @@ from gateway.models import (
 # 常量
 # ──────────────────────────────────────────────────────────────────────────────
 REST_BASE = "https://www.okx.com"
+
+# 单次请求超时。交易场景宁可快速失败重试，也不要挂在一个连接上错过下一根K线。
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+# 只读请求的重试次数（写请求不重试，见 _post）
+MAX_RETRIES = 3
+# 值得重试的 HTTP 状态：限流与网关类错误
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+class OKXError(RuntimeError):
+    """OKX 请求失败：网络异常、HTTP 错误、非 JSON 响应、业务错误码，统一成这一种。
+
+    继承 RuntimeError 是为了兼容既有的 `except RuntimeError` 调用点
+    （BaseStrategy._execute_signal 等）——在此之前，网关返回 502 HTML 时抛的是
+    JSONDecodeError，会直接穿透那些 except 被 WS 回调吞掉，止损单就这么丢了。
+    """
+
+    def __init__(self, message: str, code: str = "", status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
 
 TIMEFRAME_MAP = {
     "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
@@ -59,7 +81,9 @@ class OKXRestClient:
         headers = {"Content-Type": "application/json"}
         if self._is_demo:
             headers["x-simulated-trading"] = "1"
-        self._session = aiohttp.ClientSession(base_url=REST_BASE, headers=headers)
+        self._session = aiohttp.ClientSession(
+            base_url=REST_BASE, headers=headers, timeout=REQUEST_TIMEOUT
+        )
         return self
 
     async def __aexit__(self, *_):
@@ -77,29 +101,90 @@ class OKXRestClient:
             "OK-ACCESS-PASSPHRASE": self._passphrase,
         }
 
-    async def _get(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        body: dict | None = None,
+        auth: bool = True,
+        retries: int = 0,
+        check: bool = True,
+    ) -> dict:
+        """统一请求入口：超时、HTTP 状态检查、非 JSON 响应、有限重试。
+
+        retries>0 只应用于只读请求。写请求（尤其下单）绝不能重试——
+        超时不代表没成交，重试可能变成开两笔仓。
+        """
         query = "?" + urlencode(params) if params else ""
         full_path = path + query
-        headers = self._auth_headers("GET", full_path) if auth else {}
-        async with self._session.get(full_path, headers=headers) as resp:
-            data = await resp.json()
-        self._check(data, path)
-        return data
+        body_str = json.dumps(body) if body is not None else ""
+        headers = self._auth_headers(method, full_path, body_str) if auth else {}
+
+        delay = 0.5
+        last_error: Exception | None = None
+
+        for attempt in range(retries + 1):
+            try:
+                async with self._session.request(
+                    method, full_path, data=body_str or None, headers=headers
+                ) as resp:
+                    text = await resp.text()
+
+                    if resp.status in RETRY_STATUSES:
+                        last_error = OKXError(
+                            f"HTTP {resp.status} {path}: {text[:200]}", status=resp.status
+                        )
+                    elif resp.status >= 400:
+                        # 4xx（除限流）是请求本身有问题，重试无意义
+                        raise OKXError(
+                            f"HTTP {resp.status} {path}: {text[:200]}", status=resp.status
+                        )
+                    else:
+                        try:
+                            data = json.loads(text)
+                        except json.JSONDecodeError:
+                            # 网关故障时会返回 HTML 错误页而不是 JSON
+                            raise OKXError(
+                                f"Non-JSON response from {path}: {text[:200]}",
+                                status=resp.status,
+                            ) from None
+                        if check:
+                            self._check(data, path)
+                        return data
+
+            except asyncio.TimeoutError as e:
+                last_error = OKXError(f"Timeout on {path}")
+                last_error.__cause__ = e
+            except aiohttp.ClientError as e:
+                last_error = OKXError(f"Network error on {path}: {type(e).__name__}: {e}")
+                last_error.__cause__ = e
+
+            if attempt < retries:
+                logger.warning(
+                    f"{last_error} — retry {attempt + 1}/{retries} in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+
+        raise last_error if last_error else OKXError(f"Request failed: {path}")
+
+    async def _get(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
+        return await self._request(
+            "GET", path, params=params, auth=auth, retries=MAX_RETRIES
+        )
 
     async def _post(self, path: str, body: dict) -> dict:
-        body_str = json.dumps(body)
-        headers = self._auth_headers("POST", path, body_str)
-        async with self._session.post(path, data=body_str, headers=headers) as resp:
-            data = await resp.json()
-        self._check(data, path)
-        return data
+        # 写请求不重试：超时不代表没执行
+        return await self._request("POST", path, body=body, retries=0)
 
     @staticmethod
     def _check(data: dict, path: str):
         code = data.get("code", "0")
         if code != "0":
             msg = data.get("msg", "unknown error")
-            raise RuntimeError(f"OKX API error [{code}] {path}: {msg}")
+            raise OKXError(f"OKX API error [{code}] {path}: {msg}", code=code)
 
     # ── 行情 ─────────────────────────────────────────────────────────────────
 
@@ -236,11 +321,9 @@ class OKXRestClient:
 
         logger.info(f"Placing order: {body}")
 
-        # 不走通用 _post/_check，直接解析以获取内层真实错误码
-        body_str = json.dumps(body)
-        headers = self._auth_headers("POST", path, body_str)
-        async with self._session.post(path, data=body_str, headers=headers) as resp:
-            data = await resp.json()
+        # check=False：外层 code 非 0 时也要拿到 data[0].sCode 这个内层真实错误码。
+        # retries=0：下单绝不重试——超时不代表没成交。
+        data = await self._request("POST", path, body=body, retries=0, check=False)
 
         result = (data.get("data") or [{}])[0]
         outer_code = data.get("code", "0")
@@ -249,7 +332,7 @@ class OKXRestClient:
 
         if outer_code != "0" or s_code != "0":
             logger.error(f"Order rejected — outerCode={outer_code} sCode={s_code} sMsg={s_msg} | body={body}")
-            raise RuntimeError(f"Order failed [sCode={s_code}]: {s_msg}")
+            raise OKXError(f"Order failed [sCode={s_code}]: {s_msg}", code=s_code)
 
         order.order_id = result["ordId"]
         order.status = OrderStatus.LIVE

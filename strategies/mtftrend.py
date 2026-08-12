@@ -222,12 +222,14 @@ class MtfTrendStrategy(BaseStrategy):
 
     async def _handle_h4(self, candles: list[Candle]):
         for c in candles:
+            # 只用已收盘K线驱动指标（本回调由引擎直接订阅，不经过 handle_candle）
+            if not c.confirmed:
+                continue
+
             ef = self._h4.ema_fast.update(c.close)
             es = self._h4.ema_slow.update(c.close)
             self._h4.vol_ma.update(c.volume)
 
-            if not c.confirmed:
-                continue
             if ef is None or es is None:
                 self._h4.remember()
                 continue
@@ -258,13 +260,15 @@ class MtfTrendStrategy(BaseStrategy):
 
     async def _handle_h1(self, candles: list[Candle]):
         for c in candles:
+            # 只用已收盘K线驱动指标（本回调由引擎直接订阅，不经过 handle_candle）
+            if not c.confirmed:
+                continue
+
             ef = self._h1.ema_fast.update(c.close)
             es = self._h1.ema_slow.update(c.close)
             self._h1.vol_ma.update(c.volume)
             self._h1.macd.update(c.close)
 
-            if not c.confirmed:
-                continue
             if not self._h1.ready:
                 self._h1.remember()
                 continue
@@ -306,16 +310,16 @@ class MtfTrendStrategy(BaseStrategy):
     # ── 15M 主逻辑：精确入场信号 ─────────────────────────────────────────────
 
     async def on_candle(self, candle: Candle) -> list[Signal]:
+        # 只用已收盘K线驱动指标：盘中推送会污染 EMA/ATR/量均线
+        if not candle.confirmed:
+            return []
+
         close = candle.close
 
         self._m15.ema_fast.update(close)
         self._m15.ema_slow.update(close)
         self._m15.vol_ma.update(candle.volume)
         self._m15.atr.update(candle.high, candle.low, close)
-
-        if not candle.confirmed:
-            self._m15.remember()
-            return []
 
         if not self._m15.ready:
             self._m15.remember()
@@ -451,7 +455,6 @@ class MtfTrendStrategy(BaseStrategy):
                 f"[{self.name}] Filled: {order.side.value} "
                 f"{order.filled_qty}@{order.avg_fill_price:.4f}"
             )
-            await self._db.save_order(order, self.name)
 
     async def on_stop(self):
         logger.info(
@@ -459,6 +462,14 @@ class MtfTrendStrategy(BaseStrategy):
             f"{'flat' if self._state.flat else self._state.pos_side.value}  "
             f"4H={self._h4_trend:+d}  1H={self._h1_bias:+d}"
         )
+
+    def _recompute_stop_loss(self, entry_price: float, pos_side: PosSide) -> Optional[float]:
+        """ATR 止损，但 ATR 挂在 15M 时框上（基类默认找的是 `self._atr`）"""
+        atr = self._m15.atr
+        if not atr.ready:
+            return None
+        delta = self._sl_mult * atr.value
+        return entry_price + delta if pos_side == PosSide.SHORT else entry_price - delta
 
     # ── 工具 ──────────────────────────────────────────────────────────────────
 

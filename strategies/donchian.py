@@ -66,6 +66,11 @@ class DonchianStrategy(BaseStrategy):
         self._prev_exit_low: float | None = None
 
     async def on_candle(self, candle: Candle) -> list[Signal]:
+        # 只用已收盘K线驱动指标：盘中推送会把同一根K线反复压入通道队列，
+        # 使 N 周期通道退化成"最近 N 次推送"的极值
+        if not candle.confirmed:
+            return []
+
         # 先保存前一根K线的通道值，再更新
         prev_entry_high = self._prev_entry_high
         prev_entry_low = self._prev_entry_low
@@ -87,8 +92,6 @@ class DonchianStrategy(BaseStrategy):
         if not (self._entry_ch.ready and self._exit_ch.ready and self._atr.ready):
             return []
         if prev_entry_high is None:  # 需要至少两批数据才能比较
-            return []
-        if not candle.confirmed:
             return []
 
         close = candle.close
@@ -193,7 +196,6 @@ class DonchianStrategy(BaseStrategy):
                 f"[{self.name}] Order filled: {order.side.value} "
                 f"{order.filled_qty}@{order.avg_fill_price:.4f}"
             )
-            await self._db.save_order(order, self.name)
 
     async def on_stop(self):
         logger.info(f"[{self.name}] Stopped. {'flat' if self._state.flat else self._state.pos_side.value}")

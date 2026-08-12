@@ -73,37 +73,75 @@ class BacktestPortfolio:
     # ── 内部交易操作 ──────────────────────────────────────────────────────────
 
     def open_position(self, pos_side: str, contracts: float, price: float) -> float:
-        """开仓，返回手续费（USDT）。"""
+        """开仓，返回手续费（USDT）。同向重复调用视为加仓（按张数加权平均开仓价）。"""
+        if self._position and self._position["pos_side"] != pos_side:
+            # 回测模型是单一持仓，不支持多空对锁；先平掉原持仓，
+            # 否则原持仓的保证金会被静默覆盖丢失。
+            logger.warning(
+                f"反向开仓（已持有 {self._position['pos_side']}）：先按当前价平掉原持仓"
+            )
+            self.close_position(price)
+
         margin = contracts * self.ct_val * price / self.leverage
         fee = contracts * self.ct_val * price * FEE_RATE
         self._cash -= margin + fee
-        self._position = {
-            "pos_side": pos_side,
-            "contracts": contracts,
-            "entry_price": price,
-            "margin": margin,
-        }
+
+        p = self._position
+        if p:  # 同向加仓
+            total = p["contracts"] + contracts
+            p["entry_price"] = (
+                p["entry_price"] * p["contracts"] + price * contracts
+            ) / total
+            p["contracts"] = total
+            p["margin"] += margin
+        else:
+            self._position = {
+                "pos_side": pos_side,
+                "contracts": contracts,
+                "entry_price": price,
+                "margin": margin,
+            }
         return fee
 
-    def close_position(self, price: float) -> tuple[float, float]:
-        """平仓，返回 (pnl_net_usdt, fee_usdt)。"""
+    def close_position(
+        self, price: float, contracts: float | None = None
+    ) -> tuple[float, float, float]:
+        """平仓，返回 (pnl_net_usdt, fee_usdt, closed_contracts)。
+
+        contracts 为 None 或 >= 当前持仓时全平；否则按张数部分平仓——
+        保证金按比例释放，剩余持仓沿用原开仓均价。
+        实盘的减仓信号（如 RightSideStrategy 的 50% 减仓）必须走这条路径，
+        否则回测里每次减仓都会变成清仓，与实盘行为不符。
+        """
         if not self._position:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
+
         p = self._position
-        contracts = p["contracts"]
+        held = p["contracts"]
+        closed = held if contracts is None else min(contracts, held)
+        if closed <= 0:
+            return 0.0, 0.0, 0.0
+
         entry = p["entry_price"]
-        margin = p["margin"]
+        ratio = closed / held
+        margin_released = p["margin"] * ratio
 
         if p["pos_side"] == "long":
-            gross_pnl = (price - entry) * contracts * self.ct_val
+            gross_pnl = (price - entry) * closed * self.ct_val
         else:
-            gross_pnl = (entry - price) * contracts * self.ct_val
+            gross_pnl = (entry - price) * closed * self.ct_val
 
-        fee = contracts * self.ct_val * price * FEE_RATE
+        fee = closed * self.ct_val * price * FEE_RATE
         net_pnl = gross_pnl - fee
-        self._cash += margin + net_pnl
-        self._position = None
-        return net_pnl, fee
+        self._cash += margin_released + net_pnl
+
+        remaining = held - closed
+        if remaining <= 1e-9:
+            self._position = None
+        else:
+            p["contracts"] = remaining
+            p["margin"] -= margin_released
+        return net_pnl, fee, closed
 
     def current_equity(self, mark_price: float) -> float:
         """返回当前权益（含未实现盈亏）。"""
@@ -161,6 +199,7 @@ class BacktestRest:
         ts = self._current_candle.ts if self._current_candle else datetime.now(timezone.utc)
 
         is_open = order.stop_loss is not None  # 开仓信号带 stop_loss
+        filled = contracts
 
         if is_open:
             pos_side = order.pos_side.value  # "long" / "short"
@@ -170,20 +209,27 @@ class BacktestRest:
                 ts=ts, action=action, price=price, contracts=contracts,
             ))
         else:
-            # 平仓：从持仓方向判断
+            # 平仓/减仓：按信号给出的张数平，从持仓方向判断多空
             pos = self._portfolio._position
-            pos_side = pos["pos_side"] if pos else "long"
-            net_pnl, _ = self._portfolio.close_position(price)
-            action = f"close_{pos_side}"
-            self.trades.append(TradeRecord(
-                ts=ts, action=action, price=price, contracts=contracts,
-                pnl=net_pnl, reason=getattr(order, "_reason", ""),
-            ))
+            if not pos:
+                logger.warning(f"平仓信号但无持仓，忽略（qty={contracts}）")
+                filled = 0.0
+            else:
+                pos_side = pos["pos_side"]
+                held = pos["contracts"]
+                net_pnl, _, closed = self._portfolio.close_position(price, contracts)
+                filled = closed
+                # 部分平仓标记为 reduce_*，便于报告区分减仓腿与清仓腿
+                verb = "close" if closed >= held - 1e-9 else "reduce"
+                self.trades.append(TradeRecord(
+                    ts=ts, action=f"{verb}_{pos_side}", price=price, contracts=closed,
+                    pnl=net_pnl, reason=getattr(order, "_reason", ""),
+                ))
 
         self._order_seq += 1
         order.order_id = f"bt_{self._order_seq}"
         order.status = OrderStatus.FILLED
-        order.filled_qty = contracts
+        order.filled_qty = filled
         order.avg_fill_price = price
         return order
 
@@ -397,14 +443,14 @@ class BacktestEngine:
         if not hit:
             return
 
-        # 以止损价平仓
-        net_pnl, _ = self._portfolio.close_position(sl_price)
-        action = f"sl_{pos['pos_side']}"
+        # 以止损价平掉全部剩余持仓（可能是减仓后的余量）
+        pos_side = pos["pos_side"]
+        net_pnl, _, closed = self._portfolio.close_position(sl_price)
         self._rest.trades.append(TradeRecord(
             ts=candle.ts,
-            action=action,
+            action=f"sl_{pos_side}",
             price=sl_price,
-            contracts=pos["contracts"],
+            contracts=closed,
             pnl=net_pnl,
             reason="stop_loss",
         ))

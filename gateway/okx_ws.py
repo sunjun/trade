@@ -42,6 +42,10 @@ TIMEFRAME_CHANNEL = {
 # 需要 positions 频道的品种类型（SPOT 没有持仓概念）
 POSITIONS_INST_TYPES = {"SWAP", "FUTURES", "MARGIN", "OPTION"}
 
+# 每个订阅的待处理消息上限。只用已收盘K线后每根K线才推一次有效消息，
+# 正常情况队列长度是 0~1；堆到上千说明回调侧卡死了，此时丢弃并告警。
+QUEUE_MAXSIZE = 1000
+
 Callback = Callable[[Any], Coroutine]
 
 
@@ -61,6 +65,13 @@ class OKXWebSocketClient:
 
         self._tasks: list[asyncio.Task] = []
         self._running = False
+
+        # 每个订阅一条队列 + 一个 worker：把回调从 socket 读取循环里挪出去。
+        # 回调链里有 REST 往返（get_ticker / get_instrument / place_order），
+        # 在读取循环内 await 会让整条连接停止收包，消息积压甚至被 OKX 断开。
+        # 按订阅分队列既保证同一订阅内的消息有序，又让慢策略不拖累其他订阅。
+        self._queues: dict[str, asyncio.Queue] = {}
+        self._workers: dict[str, asyncio.Task] = {}
 
     # ── 公开订阅接口 ──────────────────────────────────────────────────────────
 
@@ -96,12 +107,14 @@ class OKXWebSocketClient:
 
     async def stop(self):
         self._running = False
-        for task in self._tasks:
+        for task in [*self._tasks, *self._workers.values()]:
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
+        self._workers.clear()
+        self._queues.clear()
         logger.info("WebSocket client stopped")
 
     # ── 内部：连接与重连 ──────────────────────────────────────────────────────
@@ -221,11 +234,37 @@ class OKXWebSocketClient:
         if parsed is None:
             return
 
-        for cb in callbacks:
-            try:
-                await cb(parsed)
-            except Exception as e:
-                logger.error(f"Callback error [{key}]: {e}", exc_info=True)
+        # 只入队，不在此处 await 回调——读取循环必须保持畅通
+        queue = self._ensure_worker(key)
+        try:
+            queue.put_nowait(parsed)
+        except asyncio.QueueFull:
+            logger.error(
+                f"WS queue full for {key} (size={queue.qsize()}); dropping message — "
+                f"回调处理速度跟不上推送速度"
+            )
+
+    def _ensure_worker(self, key: str) -> asyncio.Queue:
+        """按订阅懒创建队列与 worker。"""
+        queue = self._queues.get(key)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
+            self._queues[key] = queue
+            self._workers[key] = asyncio.create_task(
+                self._worker(key, queue), name=f"ws-worker-{key}"
+            )
+        return queue
+
+    async def _worker(self, key: str, queue: asyncio.Queue):
+        """串行消费某个订阅的消息，逐个交给回调。"""
+        while True:
+            parsed = await queue.get()
+            for cb in self._callbacks.get(key, []):
+                try:
+                    await cb(parsed)
+                except Exception as e:
+                    logger.error(f"Callback error [{key}]: {e}", exc_info=True)
+            queue.task_done()
 
     # ── 消息解析 ──────────────────────────────────────────────────────────────
 
@@ -262,9 +301,10 @@ class OKXWebSocketClient:
                     pos_side=PosSide(d["posSide"]) if d.get("posSide") else PosSide.NET,
                     status=_parse_order_status(d["state"]),
                     filled_qty=float(d.get("fillSz", 0)),
-                    avg_fill_price=float(d["avgPx"]) if d.get("avgPx") else 0.0,
-                    fee=float(d.get("fee", 0)),
-                    strategy_name=d.get("clOrdId", "").split("_")[0],  # clOrdId 约定: strategy_xxx
+                    avg_fill_price=float(d.get("avgPx") or 0),
+                    fee=float(d.get("fee") or 0),
+                    # 策略归属由引擎按 clOrdId 前缀解析（见 StrategyEngine._strategy_for_order）。
+                    # 这里不猜——OKX 的 clOrdId 只允许字母数字，没有分隔符可split。
                 ))
             return results
 

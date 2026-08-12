@@ -83,6 +83,10 @@ class TrendStrategy(BaseStrategy):
     # ── 核心逻辑 ───────────────────────────────────────────────────────────────
 
     async def on_candle(self, candle: Candle) -> list[Signal]:
+        # 只用已收盘K线驱动指标：盘中推送会污染 EMA/MACD/ATR
+        if not candle.confirmed:
+            return []
+
         close = candle.close
         self._ema_fast.update(close)
         self._ema_slow.update(close)
@@ -110,17 +114,14 @@ class TrendStrategy(BaseStrategy):
                        f"sl={self._state.stop_loss:.4f} "
                        f"uPnL={pnl:+.4f}")
 
-        if candle.confirmed:
-            logger.debug(
-                f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
-                f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
-                f"V={candle.volume:.2f} | "
-                f"EMA{self._ema_fast.period}={ef:.4f} EMA{self._ema_slow.period}={es:.4f} "
-                f"hist={hist:+.6f} ATR={atr:.4f} | {pos_str}"
-            )
-            await self._db.save_candle(candle, self.symbol, tf)
-        else:
-            return []
+        logger.debug(
+            f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
+            f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
+            f"V={candle.volume:.2f} | "
+            f"EMA{self._ema_fast.period}={ef:.4f} EMA{self._ema_slow.period}={es:.4f} "
+            f"hist={hist:+.6f} ATR={atr:.4f} | {pos_str}"
+        )
+        await self._db.save_candle(candle, self.symbol, tf)
 
         signals = []
 
@@ -226,7 +227,6 @@ class TrendStrategy(BaseStrategy):
                 f"[{self.name}] Order filled: {order.order_id} "
                 f"{order.side.value} {order.filled_qty}@{order.avg_fill_price:.4f}"
             )
-            await self._db.save_order(order, self.name)
 
     async def on_stop(self):
         logger.info(f"[{self.name}] Strategy stopped. State: {'flat' if self._state.flat else self._state.pos_side.value}")

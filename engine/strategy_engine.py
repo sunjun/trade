@@ -9,6 +9,7 @@ import yaml
 from loguru import logger
 
 from config.settings import Settings
+from engine.base_strategy import CLIENT_TAG_LEN
 from engine.portfolio import Portfolio
 from engine.risk_manager import RiskManager
 from gateway.models import InstType, Order, Position
@@ -38,6 +39,7 @@ class StrategyEngine:
         )
         self._db = Database(settings.db_path)
         self._strategies: list[Any] = []
+        self._strategy_by_tag: dict[str, Any] = {}  # clOrdId 前缀 -> 策略
         self._tasks: list[asyncio.Task] = []
         self._running = False
 
@@ -50,8 +52,9 @@ class StrategyEngine:
         # REST session 覆盖引擎完整生命周期：WS 推送后需要下单/查询时 session 必须有效
         await self._rest.__aenter__()
         try:
-            # 初始化持仓视图
+            # 初始化持仓视图，并给风控播种权益高水位（否则回撤/日亏损无基准）
             await self._portfolio.refresh(self._rest)
+            self._risk.on_equity_update(self._portfolio.get_total_equity())
 
             # 加载策略配置
             self._strategies = await self._load_strategies()
@@ -69,6 +72,7 @@ class StrategyEngine:
             failed = []
             for strategy in self._strategies:
                 try:
+                    self._warn_if_risk_limits_too_tight(strategy)
                     await self._setup_strategy(strategy)
                 except Exception as e:
                     logger.error(
@@ -79,6 +83,13 @@ class StrategyEngine:
                     failed.append(strategy)
             for s in failed:
                 self._strategies.remove(s)
+
+            self._strategy_by_tag = {s.client_tag: s for s in self._strategies}
+            if len(self._strategy_by_tag) != len(self._strategies):
+                logger.error(
+                    "Duplicate clOrdId tags across strategies — order attribution "
+                    "will be ambiguous; give the strategies more distinct names"
+                )
 
             if not self._strategies:
                 logger.error("All strategies failed to set up, engine will not start")
@@ -195,6 +206,9 @@ class StrategyEngine:
         strategy.reset_position_state()   # 重置为 FLAT，避免预热期间的虚假信号污染状态机
         logger.info(f"[{strategy.name}] Warm-up complete, state reset to FLAT")
 
+        # 预热后立刻接管交易所上已存在的持仓（进程重启/崩溃恢复）
+        await self._adopt_existing_position(strategy)
+
         # 设置合约杠杆（失败不阻断启动，仅告警——账户可能有挂单导致 OKX 拒绝调整）
         if strategy.inst_type == InstType.SWAP:
             leverage = strategy.config.get("leverage", 1)
@@ -209,16 +223,89 @@ class StrategyEngine:
         # 订阅主执行时框实时 K 线
         self._ws.subscribe_candles(symbol, timeframe, strategy.handle_candle)
 
+    async def _adopt_existing_position(self, strategy):
+        """启动时若交易所已有该品种持仓，接管进策略状态机。
+
+        不接管的后果：策略以为自己空仓，下一个开仓信号会再开一笔，变成双倍仓位，
+        而 reconcile 只会告警不会纠正。
+
+        策略配置 `on_existing_position` 可选：
+          adopt（默认）— 接管，由策略按自己的出场逻辑管理
+          abort        — 拒绝启动该策略，交由人工处理
+        接管失败（如止损价无法重建）一律降级为 abort。
+        """
+        if strategy.inst_type != InstType.SWAP:
+            return  # 现货没有 positions 频道/接口，无从查起
+
+        positions = await self._rest.get_positions(strategy.symbol)
+        position = next((p for p in positions if p.size > 0), None)
+        if position is None:
+            return
+
+        mode = strategy.config.get("on_existing_position", "adopt")
+        if mode == "adopt" and strategy.adopt_position(position):
+            return
+
+        raise RuntimeError(
+            f"交易所已有 {strategy.symbol} 持仓 "
+            f"({position.pos_side.value} size={position.size} entry={position.entry_price}) "
+            f"但策略未能接管（on_existing_position={mode}）。"
+            f"该持仓仍受交易所侧止损保护，请人工确认后再启动。"
+        )
+
+    def _warn_if_risk_limits_too_tight(self, strategy):
+        """单笔止损打满就会触发熔断时告警——风控阈值与策略仓位/杠杆不匹配。
+
+        只对固定百分比止损（sl_pct）的策略静态估算；ATR 止损无法事先算出。
+        """
+        sl_pct = strategy.config.get("sl_pct")
+        if not sl_pct:
+            return
+        pct = strategy.config.get("position_size_pct", 0.1)
+        lev = strategy.config.get("leverage", 1) if strategy.inst_type == InstType.SWAP else 1
+        worst = pct * lev * sl_pct  # 单笔止损打满占账户权益的比例
+        risk_cfg = self._settings.risk
+
+        if worst >= risk_cfg.max_daily_loss_pct or worst >= risk_cfg.max_drawdown_pct:
+            logger.warning(
+                f"[{strategy.name}] 风控阈值可能过紧：单笔止损打满 = "
+                f"{pct:.0%} 仓位 × {lev}x 杠杆 × {sl_pct:.0%} 止损 = 账户权益的 {worst:.1%}，"
+                f"而日亏损上限 {risk_cfg.max_daily_loss_pct:.1%} / 回撤熔断 {risk_cfg.max_drawdown_pct:.1%}。"
+                f"照此设置，一次止损就会暂停该策略或触发全局熔断。"
+            )
+
     # ── WebSocket 事件处理 ─────────────────────────────────────────────────────
+
+    def _strategy_for_order(self, order: Order):
+        """按 clOrdId 前 12 位标签把订单回推给下单的策略。
+
+        标签由策略名确定性生成，重启后依然对得上。
+        解析不出（外部手工下单、旧订单）时退回按品种匹配，
+        但同品种多策略会串扰，所以此时只在恰好唯一命中时才路由。
+        """
+        tag = order.client_order_id[:CLIENT_TAG_LEN]
+        strategy = self._strategy_by_tag.get(tag)
+        if strategy is not None:
+            return strategy
+
+        candidates = [s for s in self._strategies if s.symbol == order.inst_id]
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            logger.warning(
+                f"Order {order.order_id} (clOrdId={order.client_order_id!r}) matches "
+                f"{len(candidates)} strategies on {order.inst_id}; cannot attribute, skipping routing"
+            )
+        return None
 
     async def _on_order_update(self, orders: list[Order]):
         for order in orders:
             await self._portfolio.on_order_filled(order)
-            # 路由给对应策略
-            for strategy in self._strategies:
-                if order.strategy_name == strategy.name or order.inst_id == strategy.symbol:
-                    await strategy.on_order_update(order)
-            # 持久化
+            strategy = self._strategy_for_order(order)
+            if strategy is not None:
+                order.strategy_name = strategy.name
+                await strategy.on_order_update(order)
+            # 持久化（按 order_id 幂等 upsert，可能已在下单时写过一次）
             await self._db.save_order(order, order.strategy_name)
 
     async def _on_position_update(self, positions: list[Position]):
@@ -231,6 +318,8 @@ class StrategyEngine:
         while self._running:
             await asyncio.sleep(60)
             await self._portfolio.refresh(self._rest)
+            # 驱动账户维度风控（高水位 / 回撤熔断 / 日亏损比例重算）
+            self._risk.on_equity_update(self._portfolio.get_total_equity())
             # 刷新后让每个策略用真实持仓修正本地状态（爆仓/外部平仓/交易所SL触发等）
             for strategy in self._strategies:
                 try:

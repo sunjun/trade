@@ -5,7 +5,12 @@
   3. 下单频率限制
 
 备注：单笔最大金额、单品种最大持仓比例由 BaseStrategy._calc_qty 通过
-position_size_pct 隐式控制；日内亏损与回撤通过 on_pnl_update 被动追踪。
+position_size_pct 隐式控制。
+
+日内亏损与回撤由两个入口驱动：
+  - on_realized_pnl : 策略平仓/减仓下单成功后调用（BaseStrategy._execute_signal）
+  - on_equity_update: 账户权益刷新后调用（StrategyEngine 启动时 + 每 60 秒刷新循环）
+两者缺一，对应的熔断就不会生效。
 """
 import time
 from collections import defaultdict, deque
@@ -41,6 +46,8 @@ class RiskManager:
 
         # 账户维度的高水位（用于回撤计算）
         self._equity_high: float = 0.0
+        # 当日起始权益（日内亏损比例的分母，每日重置后由下一次权益刷新重新播种）
+        self._day_start_equity: float = 0.0
         self._emergency_stop = False
 
     # ── 主检查入口 ─────────────────────────────────────────────────────────────
@@ -64,40 +71,50 @@ class RiskManager:
         """下单成功后调用，更新频率计数"""
         self._order_timestamps.append(time.monotonic())
 
-    def on_pnl_update(self, strategy_name: str, pnl_delta: float, total_equity: float):
-        """订单成交后由引擎调用，更新PnL和回撤状态"""
-        if pnl_delta < 0:
-            self._daily_loss[strategy_name] += abs(pnl_delta)
+    def on_realized_pnl(self, strategy_name: str, pnl: float):
+        """策略平仓/减仓下单成功后调用，累计日内亏损并在超限时暂停该策略。
 
-        # 高水位更新
+        pnl 为本次平仓腿的已实现盈亏（USDT，亏损为负）。
+        """
+        if pnl < 0:
+            self._daily_loss[strategy_name] += abs(pnl)
+            logger.info(
+                f"[RiskManager] {strategy_name} realized {pnl:+.2f} USDT, "
+                f"daily loss now {self._daily_loss[strategy_name]:.2f} USDT"
+            )
+        self._check_daily_loss(strategy_name)
+
+    def on_equity_update(self, total_equity: float):
+        """账户权益刷新后调用，维护高水位并在回撤超限时紧急停止。"""
+        if total_equity <= 0:
+            return
+
+        if self._day_start_equity <= 0:
+            self._day_start_equity = total_equity
+            logger.info(f"[RiskManager] Day start equity = {total_equity:.2f} USDT")
+
         if total_equity > self._equity_high:
             self._equity_high = total_equity
 
-        # 策略日内亏损熔断
-        initial = self._equity_high  # 用全局高水位近似
-        if initial > 0:
-            loss_pct = self._daily_loss[strategy_name] / initial
-            if loss_pct >= self._max_daily_loss_pct:
-                if strategy_name not in self._paused_strategies:
-                    logger.warning(
-                        f"[RiskManager] Strategy {strategy_name} paused: "
-                        f"daily loss {loss_pct:.1%} >= limit {self._max_daily_loss_pct:.1%}"
-                    )
-                    self._paused_strategies.add(strategy_name)
+        drawdown = (self._equity_high - total_equity) / self._equity_high
+        if drawdown >= self._max_drawdown_pct and not self._emergency_stop:
+            logger.critical(
+                f"[RiskManager] EMERGENCY STOP: drawdown {drawdown:.1%} "
+                f">= limit {self._max_drawdown_pct:.1%} "
+                f"(high={self._equity_high:.2f}, now={total_equity:.2f})"
+            )
+            self._emergency_stop = True
 
-            # 全局最大回撤紧急停止
-            drawdown = (self._equity_high - total_equity) / self._equity_high
-            if drawdown >= self._max_drawdown_pct and not self._emergency_stop:
-                logger.critical(
-                    f"[RiskManager] EMERGENCY STOP: drawdown {drawdown:.1%} "
-                    f">= limit {self._max_drawdown_pct:.1%}"
-                )
-                self._emergency_stop = True
+        # 权益基准变了，重新评估各策略的日亏损占比
+        for name in list(self._daily_loss):
+            self._check_daily_loss(name)
 
     def reset_daily(self):
-        """每天凌晨由引擎调用，重置日内统计"""
+        """每天凌晨由引擎调用，重置日内统计。
+        账户高水位不重置——它是跨日的回撤基准。"""
         self._daily_loss.clear()
         self._paused_strategies.clear()
+        self._day_start_equity = 0.0  # 由下一次权益刷新重新播种
         logger.info("[RiskManager] Daily stats reset")
 
     def resume_strategy(self, strategy_name: str):
@@ -119,6 +136,22 @@ class RiskManager:
         return set(self._paused_strategies)
 
     # ── 内部工具 ──────────────────────────────────────────────────────────────
+
+    def _check_daily_loss(self, strategy_name: str):
+        """日内亏损达到上限则暂停该策略，直到 reset_daily 或人工 resume。"""
+        if strategy_name in self._paused_strategies:
+            return
+        base = self._day_start_equity or self._equity_high
+        if base <= 0:
+            return  # 权益尚未播种，无法判断比例
+        loss_pct = self._daily_loss[strategy_name] / base
+        if loss_pct >= self._max_daily_loss_pct:
+            logger.warning(
+                f"[RiskManager] Strategy {strategy_name} PAUSED: "
+                f"daily loss {loss_pct:.1%} >= limit {self._max_daily_loss_pct:.1%} "
+                f"({self._daily_loss[strategy_name]:.2f} / {base:.2f} USDT)"
+            )
+            self._paused_strategies.add(strategy_name)
 
     def _check_rate(self) -> bool:
         now = time.monotonic()

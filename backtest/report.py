@@ -48,8 +48,12 @@ def _calc_metrics(
         if excess.std() > 0 else 0.0
     )
 
-    # 交易统计（只看平仓交易）
-    close_trades = [t for t in trades if "close" in t.action or "sl" in t.action]
+    # 交易统计（只看实现盈亏的腿：清仓、减仓、止损）
+    close_trades = [
+        t for t in trades
+        if "close" in t.action or "sl" in t.action or "reduce" in t.action
+    ]
+    reduce_legs = [t for t in close_trades if "reduce" in t.action]
     wins = [t for t in close_trades if t.pnl > 0]
     losses = [t for t in close_trades if t.pnl <= 0]
     sl_hits = [t for t in close_trades if "sl" in t.action]
@@ -71,6 +75,7 @@ def _calc_metrics(
         "max_drawdown_pct": max_drawdown * 100,
         "sharpe": sharpe,
         "total_trades": len(close_trades),
+        "reduce_legs": len(reduce_legs),
         "win_rate_pct": win_rate * 100,
         "avg_win_usdt": avg_win,
         "avg_loss_usdt": avg_loss,
@@ -93,7 +98,7 @@ def print_report(metrics: dict) -> None:
     print(f"  最大回撤:      {metrics['max_drawdown_pct']:>11.2f}%")
     print(f"  Sharpe 比率:   {metrics['sharpe']:>12.2f}")
     print(sep)
-    print(f"  交易次数:      {metrics['total_trades']:>12d}")
+    print(f"  平仓腿数:      {metrics['total_trades']:>12d}  (其中减仓 {metrics.get('reduce_legs', 0)})")
     print(f"  胜率:          {metrics['win_rate_pct']:>11.2f}%")
     print(f"  平均盈利:      {metrics['avg_win_usdt']:>12.2f} USDT")
     print(f"  平均亏损:      {metrics['avg_loss_usdt']:>12.2f} USDT")

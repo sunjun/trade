@@ -2,6 +2,7 @@
 通过 REST 定期刷新，通过 WS 推送实时更新
 """
 import asyncio
+from collections import deque
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -18,6 +19,9 @@ class Portfolio:
         self._positions: dict[str, Position] = {}  # inst_id:pos_side -> Position
         self._total_equity: float = 0.0
         self._lock = asyncio.Lock()
+        # 已结算过余额的订单（有界，防重复扣款）。deque 自动淘汰最老的，
+        # 远超一次 REST 刷新周期内的订单量，足以覆盖重推窗口。
+        self._settled_orders: deque[str] = deque(maxlen=512)
 
     # ── REST 全量刷新 ──────────────────────────────────────────────────────────
 
@@ -54,10 +58,19 @@ class Portfolio:
         """现货订单成交后更新 USDT 余额估算。
         注意：total 是账户权益（USDT 余额 + 持仓折算），买入时 USDT 转为 base 资产，
         权益只减少手续费；卖出时同理。available 是可动用 USDT，买入要扣掉花掉的 USDT，
-        卖出则增加。下次 REST 全量刷新会用真实数据覆盖。"""
-        if order.status != OrderStatus.FILLED:
+        卖出则增加。下次 REST 全量刷新会用真实数据覆盖。
+
+        同一笔订单会被 OKX 多次推送（部分成交、完全成交、断线重连后重推），
+        必须按 order_id 去重——否则每重推一次余额就被再扣一次，
+        直到 60 秒后的 REST 全量刷新才纠正，这期间 _calc_qty 用的是错的余额。
+        """
+        if order.status != OrderStatus.FILLED or not order.order_id:
             return
         async with self._lock:
+            if order.order_id in self._settled_orders:
+                return
+            self._settled_orders.append(order.order_id)
+
             bal = self._balances.get("USDT")
             if not bal:
                 return

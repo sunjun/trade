@@ -12,7 +12,6 @@
 
 每个槽的仓位大小 = position_size_pct / n_grids × 账户可用余额
 """
-import math
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -204,36 +203,12 @@ class GridStrategy(BaseStrategy):
             reason="Grid boundary stop: close all shorts",
         )
 
-    # ── _calc_qty 覆盖：开仓用格仓位，平仓用预设qty ───────────────────────────
+    # ── 仓位：每格分摊总仓位 ───────────────────────────────────────────────────
 
-    async def _calc_qty(self, signal: Signal) -> float:
-        # 平仓信号 qty 已预设（非零），直接返回
-        if signal.qty > 0:
-            return signal.qty
-
-        # 开仓信号：每格 = position_size_pct / n_grids × 可用余额
-        pct = self.config.get("position_size_pct", 0.3)
-        grid_pct = pct / self._n_grids
-        ticker = await self._rest.get_ticker(signal.inst_id)
-        price = ticker.last
-
-        if self.inst_type == InstType.SPOT:
-            balance = self._portfolio.get_available("USDT")
-            info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
-            qty = balance * grid_pct / price
-            if info.lot_sz > 0:
-                precision = max(0, -int(math.floor(math.log10(info.lot_sz))))
-                factor = 10 ** precision
-                qty = math.floor(qty * factor / (info.lot_sz * factor)) * info.lot_sz
-            return qty if qty >= info.min_sz else 0.0
-
-        else:  # SWAP
-            balance = self._portfolio.get_available("USDT")
-            leverage = self.config.get("leverage", 1)
-            info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
-            notional = balance * grid_pct * leverage
-            contracts = math.floor(notional / (info.ct_val * price))
-            return float(contracts) if contracts >= info.min_sz else 0.0
+    def _entry_pct(self) -> float:
+        """每格 = position_size_pct / n_grids。
+        平仓信号的 qty 由基类 `_calc_qty` 直接透传（槽内记录的实际成交量）。"""
+        return self.config.get("position_size_pct", 0.3) / self._n_grids
 
     # ── 订单回调：记录成交qty供平仓使用 ─────────────────────────────────────
 
@@ -244,7 +219,6 @@ class GridStrategy(BaseStrategy):
             f"[{self.name}] Order filled: {order.side.value} "
             f"{order.filled_qty}@{order.avg_fill_price:.4f}"
         )
-        await self._db.save_order(order, self.name)
 
         # 将实际成交量回填到最新的空槽（qty=0 的槽）
         if order.side == OrderSide.BUY and not self._dual:
@@ -276,6 +250,20 @@ class GridStrategy(BaseStrategy):
         """网格没有单一 _state，重置 = 清空所有槽位"""
         self._long_slots.clear()
         self._short_slots.clear()
+
+    def adopt_position(self, position) -> bool:
+        """网格接管已有持仓：整笔塞进一个槽位。
+
+        重启后无从得知原来的分格明细（每格的开仓价/数量），塞成单槽是保守做法——
+        下一次向上跨格就整笔平掉，而不会在已有仓位之上再铺满 n_grids 格。
+        """
+        slots = self._long_slots if position.pos_side != PosSide.SHORT else self._short_slots
+        slots.append(position.size)
+        logger.warning(
+            f"[{self.name}] ADOPTED existing exchange position as a single slot: "
+            f"{position.pos_side.value} size={position.size} entry={position.entry_price:.4f}"
+        )
+        return True
 
     def reconcile_position(self, position):
         """网格对账：若交易所完全无仓但本地还有槽位，清空槽位。

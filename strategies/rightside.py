@@ -94,6 +94,10 @@ class RightSideStrategy(BaseStrategy):
     # ── 核心逻辑 ───────────────────────────────────────────────────────────────
 
     async def on_candle(self, candle: Candle) -> list[Signal]:
+        # 只用已收盘K线驱动指标：盘中推送会污染 EMA/MACD/ATR/量均线
+        if not candle.confirmed:
+            return []
+
         close  = candle.close
         volume = candle.volume
 
@@ -114,29 +118,26 @@ class RightSideStrategy(BaseStrategy):
         tf   = self.config.get("timeframe", "?")
 
         # ── 调试日志 ─────────────────────────────────────────────────────────
-        if candle.confirmed:
-            pos_str = "FLAT"
-            if not self._state.flat:
-                pnl = (close - self._state.entry_price) * (
-                    1 if self._state.pos_side == PosSide.LONG else -1
-                )
-                reduced_tag = " [HALF]" if self._half_reduced else " [FULL]"
-                pos_str = (
-                    f"{self._state.pos_side.value.upper()}{reduced_tag} "
-                    f"entry={self._state.entry_price:.4f} "
-                    f"sl={self._state.stop_loss:.4f} "
-                    f"uPnL={pnl:+.4f}"
-                )
-            logger.debug(
-                f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
-                f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
-                f"V={volume:.2f}(avg={vmа:.2f}) | "
-                f"EMA{self._ema_fast.period}={ef:.4f} EMA{self._ema_slow.period}={es:.4f} "
-                f"hist={hist:+.6f} ATR={atr:.4f} | {pos_str}"
+        pos_str = "FLAT"
+        if not self._state.flat:
+            pnl = (close - self._state.entry_price) * (
+                1 if self._state.pos_side == PosSide.LONG else -1
             )
-            await self._db.save_candle(candle, self.symbol, tf)
-        else:
-            return []
+            reduced_tag = " [HALF]" if self._half_reduced else " [FULL]"
+            pos_str = (
+                f"{self._state.pos_side.value.upper()}{reduced_tag} "
+                f"entry={self._state.entry_price:.4f} "
+                f"sl={self._state.stop_loss:.4f} "
+                f"uPnL={pnl:+.4f}"
+            )
+        logger.debug(
+            f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
+            f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
+            f"V={volume:.2f}(avg={vmа:.2f}) | "
+            f"EMA{self._ema_fast.period}={ef:.4f} EMA{self._ema_slow.period}={es:.4f} "
+            f"hist={hist:+.6f} ATR={atr:.4f} | {pos_str}"
+        )
+        await self._db.save_candle(candle, self.symbol, tf)
 
         signals: list[Signal] = []
 
@@ -336,7 +337,6 @@ class RightSideStrategy(BaseStrategy):
                 f"[{self.name}] Order filled: {order.order_id} "
                 f"{order.side.value} {order.filled_qty}@{order.avg_fill_price:.4f}"
             )
-            await self._db.save_order(order, self.name)
 
     async def on_stop(self):
         half_tag = " [HALF]" if self._half_reduced else ""
@@ -346,6 +346,20 @@ class RightSideStrategy(BaseStrategy):
     def reset_position_state(self):
         super().reset_position_state()
         self._half_reduced = False
+
+    def _recompute_stop_loss(self, entry_price: float, pos_side: PosSide) -> float | None:
+        """本策略用固定百分比止损（铁律），不是 ATR 止损"""
+        if pos_side == PosSide.SHORT:
+            return entry_price * (1 + self._sl_pct)
+        return entry_price * (1 - self._sl_pct)
+
+    def adopt_position(self, position) -> bool:
+        # 无法得知重启前是否已减过仓，按未减仓处理：
+        # 宁可后面多一次减仓机会，也不要跳过第一道锁利润的防线
+        adopted = super().adopt_position(position)
+        if adopted:
+            self._half_reduced = False
+        return adopted
 
     # ── 信号构造 ───────────────────────────────────────────────────────────────
 
