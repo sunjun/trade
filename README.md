@@ -41,7 +41,7 @@ trade/
 │   └── precision.py         # 下单精度：按 lotSz 的 Decimal 取整
 ├── strategies/              # 策略实现，见下表
 ├── storage/db.py            # SQLite 数据访问
-└── tests/                   # pytest 测试（132 项）
+└── tests/                   # pytest 测试（134 项）
 ```
 
 ## 内置策略
@@ -154,7 +154,7 @@ python cli.py pnl --days 7                # 每日盈亏统计
 ## 开发
 
 ```bash
-pytest                # 132 项测试
+pytest                # 134 项测试
 ruff check .          # 静态检查
 ruff check . --fix
 ```
@@ -300,6 +300,39 @@ max_leverage: 5      # 反解出的满档名义杠杆上限，超过则放弃该
 > 这三层是叠加的：策略先按自己的规则算，再被 `max_position_pct` 截断。
 > 想彻底控制敞口，最简单的做法是把 `RISK__MAX_POSITION_PCT` 设成你能接受的
 > 单品种最大敞口，然后让各策略在这个框内自由发挥。
+
+### ⚠️ `leverage` 在两类策略里的含义不同
+
+这是最容易踩的一个坑：
+
+| | 趋势类策略 | PyramidStrategy |
+|---|---|---|
+| `leverage: 5` 的效果 | **仓位放大 5 倍** | **仓位完全不变**，只是少占保证金 |
+| 仓位由什么决定 | `position_size_pct × leverage` | `risk_pct` 与止损距离 |
+| 想放大仓位应调 | `position_size_pct` 或 `leverage` | `risk_pct`（并同步调大 `max_leverage` 与 `RISK__MAX_POSITION_PCT`） |
+
+趋势类策略走 `BaseStrategy._calc_qty`，那里 `qty = 余额 × pct × leverage / (ctVal × 价格)`，
+杠杆直接是乘数。而 `PyramidStrategy` 覆盖了 `_calc_qty`，走的是风险反推：
+
+```
+张数 = (权益 × risk_pct) / (ctVal × Σ wᵢ(entryᵢ − 止损价))
+```
+
+式子里没有 `leverage`。此时 yaml 里的 `leverage` 只剩一个用途：
+`StrategyEngine._setup_strategy` 拿它去调交易所的 `set-leverage` 接口，
+也就是只影响**占用多少保证金**。
+
+举例（800 USDT 账户，`risk_pct: 0.02`，满档名义 191 USDT）：
+
+| 杠杆 | 满档名义 | 占用保证金 | 满档最坏亏损 |
+|---|---|---|---|
+| 1x | 191U | 191U | 15.6U |
+| 3x | 191U | 64U | 15.6U |
+| 5x | 191U | 38U | 15.6U |
+
+仓位、盈亏、止损价完全相同。全仓模式下强平看的是账户整体权益对维持保证金，
+800 权益扛 191 名义的仓位，无论几倍杠杆都远离强平线——所以这里调杠杆
+**既不会放大收益，也不会放大风险**，只是把保证金从占用状态释放出来。
 
 ---
 

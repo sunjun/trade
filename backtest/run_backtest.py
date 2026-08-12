@@ -25,13 +25,15 @@ from loguru import logger
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from backtest.data_loader import fetch_all_candles
+from backtest.data_loader import fetch_all_candles, fetch_instrument_info
 from backtest.engine import BacktestEngine
 from backtest.report import _calc_metrics, export_trades_csv, plot_results, print_report
 from gateway.models import InstrumentInfo, InstType
 
 # ── 品种静态信息（避免在回测时发 REST 请求获取合约信息）────────────────────────
 # OKX 合约信息（可手动扩展）
+# 仅作取不到规格时的离线兜底。真实值一律走 fetch_instrument_info()——
+# 硬编码副本会随交易所调整而悄悄漂移（ETH-USDT-SWAP 的 ctVal 就曾差 10 倍）。
 INST_INFO_MAP = {
     "ETH-USDT-SWAP": InstrumentInfo(
         inst_id="ETH-USDT-SWAP", inst_type=InstType.SWAP,
@@ -71,6 +73,20 @@ def _import_strategy_cls(class_name: str):
     return getattr(module, class_name)
 
 
+async def _resolve_inst_info(inst_id: str, inst_type: InstType) -> InstrumentInfo:
+    """优先取交易所真实规格，取不到再退回离线兜底表。"""
+    try:
+        return await fetch_instrument_info(inst_id, inst_type.value)
+    except Exception as e:
+        fallback = INST_INFO_MAP.get(inst_id)
+        if fallback is None:
+            raise ValueError(
+                f"取 {inst_id} 规格失败且无离线兜底: {e}"
+            ) from e
+        logger.warning(f"取 {inst_id} 规格失败（{e}），退回离线兜底表——数值可能已过时")
+        return fallback
+
+
 async def run(args: argparse.Namespace) -> None:
     # ── 加载策略配置 ──────────────────────────────────────────────────────────
     entry = _load_strategy_entry(args.strategy)
@@ -78,9 +94,7 @@ async def run(args: argparse.Namespace) -> None:
     inst_type    = InstType(entry["inst_type"])
     strategy_cfg = entry.get("config", {})
     strategy_cls = _import_strategy_cls(entry["class"])
-    inst_info    = INST_INFO_MAP.get(inst_id)
-    if inst_info is None:
-        raise ValueError(f"No InstrumentInfo for {inst_id}. Add it to INST_INFO_MAP.")
+    inst_info    = await _resolve_inst_info(inst_id, inst_type)
 
     logger.info(f"Strategy: {args.strategy} | Symbol: {inst_id} | Capital: {args.capital} USDT")
 

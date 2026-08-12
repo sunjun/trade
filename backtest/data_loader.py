@@ -28,9 +28,10 @@ from pathlib import Path
 import aiohttp
 from loguru import logger
 
-from gateway.models import Candle
+from gateway.models import Candle, InstrumentInfo, InstType
 
 BASE_URL = "https://www.okx.com"
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
 TIMEFRAME_MAP = {
     "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
     "1H": "1H", "2H": "2H", "4H": "4H", "6H": "6H", "12H": "12H",
@@ -258,3 +259,41 @@ async def fetch_all_candles(
         f"({merged[0].ts.strftime('%Y-%m-%d')} → {merged[-1].ts.strftime('%Y-%m-%d')})"
     )
     return merged
+
+
+# ── 品种规格 ──────────────────────────────────────────────────────────────────
+
+async def fetch_instrument_info(inst_id: str, inst_type: str) -> InstrumentInfo:
+    """从 OKX 拉取真实的合约规格（ctVal / lotSz / minSz / tickSz）。
+
+    此前回测用的是硬编码表，而它与交易所实际值已经漂移——ETH-USDT-SWAP 的
+    ctVal 实际是 0.1 而非 0.01（仓位差 10 倍），两个永续的 lotSz/minSz 实际是
+    0.01 而非 1.0（取整粒度差 100 倍）。实盘走 get_instrument() 取的是真实值，
+    所以这类漂移只会让回测悄悄偏离实盘。直接取，不再维护副本。
+    """
+    url = f"{BASE_URL}/api/v5/public/instruments"
+    params = {"instType": inst_type, "instId": inst_id}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as resp:
+            data = await resp.json()
+
+    if data.get("code") != "0" or not data.get("data"):
+        raise RuntimeError(
+            f"取 {inst_id} 规格失败: [{data.get('code')}] {data.get('msg')}"
+        )
+    d = data["data"][0]
+    info = InstrumentInfo(
+        inst_id=inst_id,
+        inst_type=InstType(inst_type),
+        base_ccy=d.get("baseCcy") or d.get("ctValCcy", ""),
+        quote_ccy=d.get("quoteCcy") or d.get("settleCcy", ""),
+        lot_sz=float(d["lotSz"]),
+        min_sz=float(d["minSz"]),
+        ct_val=float(d.get("ctVal") or 1),
+        tick_sz=float(d["tickSz"]),
+    )
+    logger.info(
+        f"Instrument {inst_id}: ctVal={info.ct_val} lotSz={info.lot_sz} "
+        f"minSz={info.min_sz} tickSz={info.tick_sz}"
+    )
+    return info

@@ -386,3 +386,41 @@ def test_extra_tf_configs_is_accessible(pyramid):
     tf, _warm, handler = cfgs[0]
     assert tf == "4H"
     assert handler == pyramid._handle_higher_tf
+
+
+async def test_sizing_is_independent_of_leverage(make_strategy, fake_rest):
+    """本策略的仓位由 risk_pct 与止损距离决定，与 leverage 无关。
+
+    yaml 里的 leverage 只被 StrategyEngine 拿去调交易所的 set-leverage，
+    即只影响占用多少保证金。趋势类策略走 BaseStrategy._calc_qty，那里
+    leverage 是仓位乘数——两者语义不同，容易混淆，故锁死本策略的行为。
+    """
+    plans = {}
+    for lev in (1, 3, 5, 10):
+        s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+            "fib_lookback": 20, "risk_pct": 0.02, "max_leverage": 5,
+            "ema_fast": 3, "ema_slow": 5, "leverage": lev,
+        })
+        await _warm_higher(s, rising=True)
+        await s._plan_round(s._supports[0] - 1)
+        plans[lev] = (s._step_qty, s._stop_price)
+
+    first = plans[1]
+    for lev, plan in plans.items():
+        assert plan[0] == pytest.approx(first[0]), f"leverage={lev} 改变了仓位"
+        assert plan[1] == pytest.approx(first[1]), f"leverage={lev} 改变了止损价"
+
+
+async def test_sizing_scales_with_risk_pct(make_strategy, fake_rest):
+    """想放大仓位应调 risk_pct——它同时按比例放大最坏亏损"""
+    sizes = {}
+    for rp in (0.02, 0.04):
+        s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+            "fib_lookback": 20, "risk_pct": rp, "max_leverage": 99,
+            "ema_fast": 3, "ema_slow": 5,
+        })
+        await _warm_higher(s, rising=True)
+        await s._plan_round(s._supports[0] - 1)
+        sizes[rp] = sum(s._step_qty)
+
+    assert sizes[0.04] == pytest.approx(sizes[0.02] * 2, rel=1e-6)

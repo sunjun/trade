@@ -41,7 +41,7 @@ trade/
 │   └── precision.py         # Order sizing: Decimal rounding to lotSz
 ├── strategies/              # Strategy implementations, see table below
 ├── storage/db.py            # SQLite data access
-└── tests/                   # pytest suite (132 tests)
+└── tests/                   # pytest suite (134 tests)
 ```
 
 ## Built-in Strategies
@@ -142,7 +142,7 @@ or 160MB (with charts); run those on a dev machine.
 ## Development
 
 ```bash
-pytest                # 132 tests
+pytest                # 134 tests
 ruff check .          # lint
 ruff check . --fix
 ```
@@ -306,6 +306,42 @@ same risk, a distant stop automatically shrinks it. `max_leverage` bounds that o
 > `max_position_pct`. The simplest way to control exposure overall is to set
 > `RISK__MAX_POSITION_PCT` to the largest per-symbol exposure you can stomach and
 > let strategies operate freely inside it.
+
+### ⚠️ `leverage` means different things in different strategies
+
+This is the easiest trap to fall into:
+
+| | Trend strategies | PyramidStrategy |
+|---|---|---|
+| Effect of `leverage: 5` | **5× larger position** | **Position unchanged**, only less margin locked |
+| Size determined by | `position_size_pct × leverage` | `risk_pct` and stop distance |
+| To size up, change | `position_size_pct` or `leverage` | `risk_pct` (and raise `max_leverage` / `RISK__MAX_POSITION_PCT` to match) |
+
+Trend strategies go through `BaseStrategy._calc_qty`, where
+`qty = balance × pct × leverage / (ctVal × price)` — leverage is a plain multiplier.
+`PyramidStrategy` overrides `_calc_qty` and solves backwards from risk instead:
+
+```
+qty = (equity × risk_pct) / (ctVal × Σ wᵢ(entryᵢ − stop_price))
+```
+
+There is no `leverage` in that formula. The yaml `leverage` key then has exactly one
+remaining job: `StrategyEngine._setup_strategy` passes it to the exchange's
+`set-leverage` endpoint, so it only changes **how much margin is locked**.
+
+Example (800 USDT account, `risk_pct: 0.02`, full-load notional 191 USDT):
+
+| Leverage | Notional | Margin locked | Worst-case loss |
+|---|---|---|---|
+| 1x | 191U | 191U | 15.6U |
+| 3x | 191U | 64U | 15.6U |
+| 5x | 191U | 38U | 15.6U |
+
+Position, PnL and stop price are identical. Under cross margin, liquidation is
+evaluated against total account equity versus maintenance margin — 800 equity
+carrying 191 notional stays far from liquidation at any leverage setting. So
+changing leverage here **amplifies neither returns nor risk**; it merely frees up
+margin that was otherwise reserved.
 
 ---
 

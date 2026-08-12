@@ -30,9 +30,12 @@ sys.path.insert(0, str(ROOT))
 from backtest.data_loader import fetch_all_candles
 from backtest.engine import BacktestEngine
 from backtest.report import _calc_metrics, export_trades_csv, plot_results, print_report
+from backtest.run_backtest import _resolve_inst_info
 from gateway.models import InstrumentInfo, InstType
 
 # ── 合约静态信息表（与 run_backtest.py 保持同步）─────────────────────────────
+# 仅作取不到规格时的离线兜底。真实值一律走 fetch_instrument_info()——
+# 硬编码副本会随交易所调整而悄悄漂移（ETH-USDT-SWAP 的 ctVal 就曾差 10 倍）。
 INST_INFO_MAP: dict[str, InstrumentInfo] = {
     "ETH-USDT-SWAP": InstrumentInfo(
         inst_id="ETH-USDT-SWAP", inst_type=InstType.SWAP,
@@ -167,7 +170,7 @@ async def run_one(
     inst_type  = InstType(entry["inst_type"])
     config     = entry.get("config", {})
 
-    inst_info = INST_INFO_MAP.get(inst_id)
+    inst_info = await _resolve_inst_info(inst_id, inst_type)
     if inst_info is None:
         return {"name": name, "status": f"no InstrumentInfo for {inst_id}", "metrics": {}}
 
