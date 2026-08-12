@@ -34,6 +34,10 @@
   trend_max_margin   快线领先慢线的**上限**（如 0.02 = 2%），默认 None 不设限。
                      领先太多说明价格刚跑完一段，此时接回调接的是动能衰竭
   first_entry_at_support  首仓是否也要等回调到第一道支撑，默认 true
+  drop_atr_min       首仓门槛：距近期高点至少跌够几个 ATR（如 2.0），默认 None 不设限。
+                     用波动率归一化，固定百分比在不同波动率时期含义完全不同
+  require_reclaim    首仓是否要求右侧确认（本根收阳且收在上一根高点之上），默认 false。
+                     超跌判据本身不含「跌势停没停」的信息，单用会在下跌全程接飞刀
   ladder_spread      加仓档位是否均匀铺满整个支撑区间（末档落在前低、紧挨止损），
                      默认 false = 只用最浅的几道支撑。false 时加仓射程远短于
                      止损射程，中间一段满仓无摊薄
@@ -138,6 +142,9 @@ class PyramidStrategy(BaseStrategy):
         self._first_at_support: bool = config.get("first_entry_at_support", True)
         self._ladder_spread: bool = config.get("ladder_spread", False)
         self._trend_max_margin: float | None = config.get("trend_max_margin")
+        self._drop_atr_min: float | None = config.get("drop_atr_min")
+        self._require_reclaim: bool = config.get("require_reclaim", False)
+        self._prev_candle: Candle | None = None   # 上一根主时框K线，用于收复确认
 
         # 止盈梯度**递减**：浅档子弹多、暴露低，扛得起等一个大波段；
         # 深档的目标是逃出来并重置，不是把利润最大化。
@@ -360,7 +367,7 @@ class PyramidStrategy(BaseStrategy):
                 return signals
 
         if self._step == 0:
-            entry = await self._check_first_entry(close)
+            entry = await self._check_first_entry(candle)
             if entry:
                 signals.append(entry)
         elif self._step < self._max_steps:
@@ -374,6 +381,8 @@ class PyramidStrategy(BaseStrategy):
                 f"（滞留 {self._bars_at_max}/{self._max_hold_bars} 根K线）"
             )
 
+        # 收复确认要比对上一根，所以放在全部检查之后再更新
+        self._prev_candle = candle
         await self._save(signals)
         return signals
 
@@ -432,12 +441,38 @@ class PyramidStrategy(BaseStrategy):
             self._reset_cycle()
         return sig
 
-    async def _check_first_entry(self, close: float) -> Signal | None:
+    def drop_atr(self, close: float) -> float:
+        """距近期高点跌了几个 ATR。用波动率归一化，固定百分比在不同波动率
+        时期含义完全不同（ATR=2% 和 ATR=6% 时跌 8% 是两回事）。
+
+        锚点和 ATR 都取自高时框，与支撑位、结构止损、加仓间距同源——
+        再引入一套标准差口径会让几个模块用两种波动率定义，参数之间没法互推。
+        """
+        if not self._highs or not self._atr.value:
+            return 0.0
+        return (max(self._highs) - close) / self._atr.value
+
+    def _reclaimed(self, candle: Candle) -> bool:
+        """右侧确认：本根收阳且收在上一根高点之上。
+
+        超跌判据本身不含「跌势停没停」的信息——下跌趋势里它在全程反复满足，
+        只会让你更早更频繁地接飞刀（回测里 2025-09~11 三轮连续止损，每轮
+        入场时"已回调至支撑"都成立）。这道确认用最少的信息换掉最低点。
+        """
+        if self._prev_candle is None:
+            return False
+        return candle.close > candle.open and candle.close > self._prev_candle.high
+
+    async def _check_first_entry(self, candle: Candle) -> Signal | None:
         """首仓：趋势向上 + 已回调到第一道支撑，才开。
 
         原草稿在这里是无条件市价买入——而首仓决定了整轮的成本基准，
         却是唯一不看位置的一笔。
+
+        drop_atr_min / require_reclaim 是可选的第三、四道闸门：前者要求
+        「跌得够深（按波动率归一化）」，后者要求「跌势已经出现停止的迹象」。
         """
+        close = candle.close
         if not self._trend_ok():
             if not (self._ema_fast.ready and self._ema_slow.ready):
                 self._note = (
@@ -466,6 +501,23 @@ class PyramidStrategy(BaseStrategy):
                 f"空仓等待｜趋势向上，但现价 {close:.4f} 高于第一道支撑 "
                 f"{self._supports[0]:.4f}，还需回调 "
                 f"{close / self._supports[0] - 1:.2%} 才建首仓"
+            )
+            return None
+        if self._drop_atr_min is not None and self.drop_atr(close) < self._drop_atr_min:
+            self._note = (
+                f"空仓等待｜跌幅不够：距近期高点 {max(self._highs):.4f} 跌了 "
+                f"{self.drop_atr(close):.2f} 个 ATR < 门槛 {self._drop_atr_min:.2f}"
+                f"（ATR={self._atr.value:.4f}，还需再跌 "
+                f"{(self._drop_atr_min - self.drop_atr(close)) * self._atr.value:.4f}）"
+            )
+            return None
+        if self._require_reclaim and not self._reclaimed(candle):
+            prev_high = self._prev_candle.high if self._prev_candle else None
+            self._note = (
+                f"空仓等待｜已超跌但跌势未止：本根 O={candle.open:.4f} "
+                f"C={candle.close:.4f}"
+                + (f"，需收阳且收上前一根高点 {prev_high:.4f}"
+                   if prev_high is not None else "，等待上一根K线")
             )
             return None
         if not await self._plan_round(close):

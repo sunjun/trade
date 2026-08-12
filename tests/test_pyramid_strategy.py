@@ -527,3 +527,85 @@ async def test_sizing_scales_with_risk_pct(make_strategy, fake_rest):
         sizes[rp] = sum(s._step_qty)
 
     assert sizes[0.04] == pytest.approx(sizes[0.02] * 2, rel=1e-6)
+
+
+# ── 超跌门槛 + 右侧确认 ───────────────────────────────────────────────────────
+
+async def test_drop_atr_gate_blocks_shallow_pullbacks(make_strategy, fake_rest):
+    """跌幅按 ATR 归一化：固定百分比在不同波动率时期含义完全不同"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+        "fib_lookback": 20, "ema_fast": 3, "ema_slow": 5,
+        "drop_atr_min": 99.0,      # 高到任何回调都过不了
+    })
+    await _warm_higher(s, rising=True)
+    assert await s.on_candle(_m15(s._supports[0] - 1)) == []
+    assert "跌幅不够" in s.decision_note()
+
+
+async def test_drop_atr_gate_allows_deep_pullbacks(make_strategy, fake_rest):
+    s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+        "fib_lookback": 20, "ema_fast": 3, "ema_slow": 5, "drop_atr_min": 0.0,
+    })
+    await _warm_higher(s, rising=True)
+    assert len(await s.on_candle(_m15(s._supports[0] - 1))) == 1
+
+
+async def test_drop_atr_is_measured_in_atr_units(make_strategy, fake_rest):
+    s = make_strategy(PyramidStrategy, rest=fake_rest,
+                      config={"fib_lookback": 20, "ema_fast": 3, "ema_slow": 5})
+    await _warm_higher(s, rising=True)
+    high = max(s._highs)
+    close = high - 3.0 * s._atr.value
+    assert s.drop_atr(close) == pytest.approx(3.0)
+    assert s.drop_atr(high) == pytest.approx(0.0)
+
+
+async def test_reclaim_requires_bullish_close_above_prev_high(make_strategy, fake_rest):
+    """超跌不含「跌势停没停」的信息，单用会在下跌全程接飞刀"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+        "fib_lookback": 20, "ema_fast": 3, "ema_slow": 5, "require_reclaim": True,
+    })
+    await _warm_higher(s, rising=True)
+    price = s._supports[0] - 1
+
+    # 第一根：没有上一根可比，不该开
+    down = Candle(ts=datetime(2026, 2, 1, tzinfo=UTC), open=price + 5,
+                  high=price + 6, low=price - 1, close=price,
+                  volume=10.0, confirmed=True)
+    assert await s.on_candle(down) == []
+
+    # 第二根仍是阴线：跌势未止，不该开
+    down2 = Candle(ts=datetime(2026, 2, 1, 0, 15, tzinfo=UTC), open=price,
+                   high=price + 1, low=price - 5, close=price - 4,
+                   volume=10.0, confirmed=True)
+    assert await s.on_candle(down2) == []
+    assert "跌势未止" in s.decision_note()
+
+    # 第三根收阳且收上前一根高点：确认成立
+    up = Candle(ts=datetime(2026, 2, 1, 0, 30, tzinfo=UTC), open=price - 4,
+                high=price + 3, low=price - 5, close=price + 2,
+                volume=10.0, confirmed=True)
+    assert s._reclaimed(up) is True
+
+
+async def test_reclaim_rejects_bullish_bar_that_stays_below_prev_high(
+        make_strategy, fake_rest):
+    """收阳但没收上前高 = 反弹力度不够，仍算跌势未止"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest,
+                      config={"fib_lookback": 20, "require_reclaim": True})
+    s._prev_candle = Candle(ts=datetime(2026, 2, 1, tzinfo=UTC), open=110.0,
+                            high=112.0, low=100.0, close=101.0,
+                            volume=1.0, confirmed=True)
+    weak = Candle(ts=datetime(2026, 2, 1, 0, 15, tzinfo=UTC), open=101.0,
+                  high=105.0, low=100.0, close=104.0, volume=1.0, confirmed=True)
+    assert weak.close > weak.open, "确实是阳线"
+    assert s._reclaimed(weak) is False, "但没收上前一根高点 112"
+
+
+async def test_both_gates_default_off(make_strategy, fake_rest):
+    """默认行为不变——这两道闸门是可选的"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest,
+                      config={"fib_lookback": 20, "ema_fast": 3, "ema_slow": 5})
+    await _warm_higher(s, rising=True)
+    assert s._drop_atr_min is None and s._require_reclaim is False
+    assert len(await s.on_candle(_m15(s._supports[0] - 1))) == 1
