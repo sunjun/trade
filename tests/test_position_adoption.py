@@ -143,7 +143,8 @@ async def test_spot_is_skipped():
 
 
 def test_warns_when_risk_limits_too_tight(caplog):
-    risk_cfg = SimpleNamespace(max_daily_loss_pct=0.02, max_drawdown_pct=0.05)
+    risk_cfg = SimpleNamespace(max_daily_loss_pct=0.02, max_drawdown_pct=0.05,
+                               max_position_pct=1.0)
     e = _Engine(_settings=SimpleNamespace(risk=risk_cfg))
     # 项目当前 eth_rightside_swap 的实际配置：20% × 3x × 10% = 单笔 6%
     tight = _Strat(config={"sl_pct": 0.10, "position_size_pct": 0.2, "leverage": 3})
@@ -157,12 +158,37 @@ def test_warns_when_risk_limits_too_tight(caplog):
 
         messages.clear()
         loose = _Engine(_settings=SimpleNamespace(
-            risk=SimpleNamespace(max_daily_loss_pct=0.10, max_drawdown_pct=0.20)))
+            risk=SimpleNamespace(max_daily_loss_pct=0.10, max_drawdown_pct=0.20,
+                                 max_position_pct=1.0)))
         loose._warn_if_risk_limits_too_tight(tight)
         assert not any("风控阈值可能过紧" in m for m in messages)
 
         messages.clear()
         e._warn_if_risk_limits_too_tight(_Strat(config={"atr_sl_multiplier": 2.0}))
         assert not messages, "ATR 止损无法静态估算，不该误报"
+    finally:
+        logger.remove(sink)
+
+
+def test_warns_when_position_would_be_capped():
+    """策略配置的名义价值超过全局上限时，实际下单量会被悄悄缩减——必须告警"""
+    from loguru import logger
+    risk_cfg = SimpleNamespace(max_daily_loss_pct=0.5, max_drawdown_pct=0.5,
+                               max_position_pct=0.1)
+    e = _Engine(_settings=SimpleNamespace(risk=risk_cfg))
+    # 20% 仓位 × 3x = 60% 名义，远超 10% 上限
+    s = _Strat(config={"position_size_pct": 0.2, "leverage": 3})
+
+    messages = []
+    sink = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        e._warn_if_risk_limits_too_tight(s)
+        assert any("仓位会被全局上限截断" in m for m in messages)
+
+        messages.clear()
+        loose = _Engine(_settings=SimpleNamespace(risk=SimpleNamespace(
+            max_daily_loss_pct=0.5, max_drawdown_pct=0.5, max_position_pct=1.0)))
+        loose._warn_if_risk_limits_too_tight(s)
+        assert not any("仓位会被全局上限截断" in m for m in messages)
     finally:
         logger.remove(sink)

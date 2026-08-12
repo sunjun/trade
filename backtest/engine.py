@@ -477,8 +477,10 @@ class BacktestEngine:
             reason="stop_loss",
         ))
         self._sl_trades.append(self._rest.trades[-1])
-        state.close()
-        strategy._candles_since = 0
+        # 走策略自己的重置钩子，而不是只 close() 状态机——
+        # 有额外状态的策略（金字塔的档位与计划阶梯、网格的槽位）
+        # 否则会残留，下一轮从错误的状态开始
+        strategy.reset_position_state()
         logger.debug(
             f"  SL hit @ {sl_price:.4f}  pnl={net_pnl:+.2f} USDT  "
             f"({candle.ts.strftime('%Y-%m-%d %H:%M')})"

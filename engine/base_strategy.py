@@ -187,6 +187,8 @@ class BaseStrategy(ABC):
             return
 
         qty = await self._calc_qty(signal)
+        if not signal.reduce_only:
+            qty = await self._cap_by_max_position(signal, qty)
         if qty <= 0:
             avail = self._portfolio.get_available("USDT")
             logger.warning(
@@ -231,6 +233,34 @@ class BaseStrategy(ABC):
         引擎按前 12 位把交易所推回来的订单路由回本策略。"""
         self._order_seq = (self._order_seq + 1) % 1000
         return f"{self.client_tag}{int(time.time() * 1000)}{self._order_seq:03d}"
+
+    async def _cap_by_max_position(self, signal: Signal, qty: float) -> float:
+        """开仓腿按全局 max_position_pct 截断，作为「最大使用资金」的兜底闸门。
+
+        策略自己算多少是策略的事，这道闸门保证不管哪个策略、怎么配参数，
+        单个品种的名义价值（含已有持仓）都不会超过账户权益的既定比例。
+        """
+        if qty <= 0:
+            return qty
+        equity = self._portfolio.get_total_equity()
+        if equity <= 0:
+            return qty
+
+        info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
+        ticker = await self._rest.get_ticker(signal.inst_id)
+        unit_value = info.ct_val * ticker.last
+        if unit_value <= 0:
+            return qty
+
+        pos = self._portfolio.get_position(signal.inst_id, signal.pos_side.value)
+        existing = (pos.size if pos else 0.0) * unit_value
+
+        allowed = self._risk.cap_notional(
+            existing, qty * unit_value, equity, self.name
+        )
+        if allowed >= qty * unit_value:
+            return qty
+        return round_qty(allowed / unit_value, info.lot_sz, info.min_sz)
 
     def _snapshot_close_pnl(self, signal: Signal) -> float | None:
         """平仓/减仓下单前，估算本次平仓腿的已实现盈亏（USDT），用于风控日亏损统计。

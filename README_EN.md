@@ -41,7 +41,7 @@ trade/
 │   └── precision.py         # Order sizing: Decimal rounding to lotSz
 ├── strategies/              # Strategy implementations, see table below
 ├── storage/db.py            # SQLite data access
-└── tests/                   # pytest suite (115 tests)
+└── tests/                   # pytest suite (132 tests)
 ```
 
 ## Built-in Strategies
@@ -142,7 +142,7 @@ or 160MB (with charts); run those on a dev machine.
 ## Development
 
 ```bash
-pytest                # 115 tests
+pytest                # 132 tests
 ruff check .          # lint
 ruff check . --fix
 ```
@@ -179,58 +179,133 @@ tiered take-profit or a global hard stop.
 5. **Tiered take-profit acknowledges** that different exposure levels warrant
    different targets.
 
-### Weaknesses and risks
+### Improvements made
 
-1. **It is fundamentally a martingale: high win rate, large tail loss.** The equity
-   curve grinds upward and then gives back dozens of wins in a single trending
-   decline. A backtest that does not span a real bear leg will badly overstate it.
-2. **Stop effectiveness runs opposite to exposure.** The hard stop is a fixed USDT
-   amount (15% of committed capital). Early on, with a small position, price must
-   fall enormously to trigger it — effectively no stop. Fully loaded, a small move
-   trips it. Protection is weakest exactly when it matters most.
-3. **Take-profit targets rise with step count, which is backwards for escaping.**
-   `tp_schedule` grows 1.5% → 5.0%, so the deeper underwater you are, the further
-   price must rally before you are allowed out. Most DCA designs decrease this.
-4. **The first entry is an unconditional market buy.** Support levels and ATR only
-   gate the *adds*; the base position — which dominates the cycle's average cost —
-   ignores location entirely. This mirrors the original sketch. The first
-   improvement to make would be a trend filter on the initial entry (e.g. require
-   4H EMAs stacked bullish).
-5. **Long only, no trend filter.** In a sustained downtrend it exhausts all 6 steps
-   and then sits fully loaded.
-6. **Fees and funding are not negligible.** A full cycle is 6 entries plus 1 exit of
-   taker fills on growing notional, and multi-day perpetual funding erodes an
-   already thin first-step target of 1.5%.
+The sketch had three structural problems; all are fixed here.
 
-### Changes made versus the sketch
+**1. Stop strength ran opposite to exposure → structural stop + risk-first sizing**
 
-The original is a `while True` + `time.sleep(3)` polling script holding all state in
-local variables. Porting it fixed several issues that would cause real incidents:
+The original hard stop was a fixed USDT amount (15% of committed capital). In price terms:
 
-| Issue | Sketch behaviour | This implementation |
+| Step | Notional | Price drop needed to trigger |
 |---|---|---|
-| Supports computed once | Frozen forever after entry; the ladder goes stale | Refreshed on every 4H close while flat, frozen once in position so the ladder does not move underfoot |
-| State lost on restart | `current_step` resets to 0 and it opens a fresh cycle on top of the existing position | Adopts the position at startup; step unknown so it assumes fully loaded and stops adding |
-| Stop-loss check cadence | Depends on a 3-second ticker poll | Checked on every closed 15m candle; the higher timeframe only computes indicators |
-| Add budget vs. drawdown | Not addressed | Committed capital is snapshotted at entry, so later steps do not shrink with equity |
-| Error handling | `except Exception: sleep(5)` swallows everything forever | Unified `OKXError` at the gateway; failed entries roll back local state |
+| 1 | 1960 | **38.3%** (effectively no stop) |
+| 6 | 25000 | **3.0%** (one or two days of normal noise) |
+
+Now the stop price comes from market structure (`lowest support − stop_atr_mult × ATR`
+— breaking it invalidates the "supports will hold" premise), and tranche sizes are
+solved backwards from it:
+
+```
+Σ wᵢ·Q·(entryᵢ − stop_price)·ct_val = equity × risk_pct
+```
+
+The planned add prices *are* the support levels, so this has a closed form. The
+**worst case is therefore known and bounded before the first order**, and every
+earlier step loses strictly less than budget — protection now scales monotonically
+with exposure. If the implied full-load leverage exceeds `max_leverage`, the round
+is skipped entirely.
+
+**2. Rising take-profit targets → decreasing + partial trims + time stop**
+
+Targets are relative to average entry, which always sits above current price when
+averaging down — and the gap widens with each add:
+
+| | Price now | Avg entry | Target | Rally needed |
+|---|---|---|---|---|
+| Step 1 | 100 | 100 | 101.5 | +1.5% |
+| Step 6 (old rising schedule) | 80 | 86.6 | 90.9 | **+13.7%** |
+
+Three changes: `tp_schedule` now decreases (deep steps just want out); `partial_tp`
+trims the *deepest* tranche on a bounce instead of waiting for one big all-or-nothing
+target; and `max_hold_bars` forces an exit after prolonged full-load stagnation —
+being trapped is what actually kills martingales, so exposure duration now has a bound.
+
+**3. Unconditional first entry → trend filter + wait for the pullback**
+
+`trend_filter` requires the higher-timeframe EMAs stacked bullish before a new round,
+removing the "load up fully during a sustained decline" scenario. `first_entry_at_support`
+makes the base position wait for the first Fibonacci retracement, so it rests on the
+same structural logic as the adds.
+
+### Remaining risks
+
+1. **Still a martingale** — high win rate, fat left tail. The changes make the worst
+   case computable; they do not and cannot change the shape of that distribution.
+2. **Long only.** The trend filter blocks most declines but cannot guarantee the
+   trend holds after entry.
+3. **Fees and funding**: up to 6 entries plus several trims per round, and multi-day
+   perpetual funding erodes the already-thin deep-step targets.
+4. **Filters cut trade frequency sharply**, shrinking the sample and weakening the
+   statistical weight of any backtest.
 
 ### Measured Result
 
-BTC-USDT-SWAP, 5000 × 15m candles (~2 months), 10000 USDT start, default params:
+ETH-USDT-SWAP, 20065 × 15m candles (2026-01-15 → 2026-08-12, ~7 months),
+10000 USDT start, default params:
 
 ```
-Total return  +1.25%        Max drawdown   -11.45%
-Win rate      92.86%        Sharpe           0.31
-Avg win       93.23 USDT    Avg loss     1029.20 USDT
+Total return  +1.78%       Max drawdown   -1.38%
+Closing legs  34 (19 trims)          Win rate  94.12%
+Avg win       9.06 USDT    Avg loss      58.31 USDT
 ```
 
-**One loss ≈ eleven wins** — exactly the shape described in point 1, and this window
-does not even contain a real trending decline. The headline return is positive; the
-win/loss structure shows how fragile that positive is.
+Versus the pre-redesign run (BTC, 2 months): max drawdown improved from
+**−11.45% to −1.38%**, and the loss/win ratio from **11× to 6.4×**. The cost is
+position sizes an order of magnitude smaller, and correspondingly smaller absolute
+returns — **that is precisely the trade: returns exchanged for a computable worst case**.
 
-> Recommendation: keep `capital_pct` well below 1.0 (default 0.5) and **backtest
-> across a genuinely trending decline** before considering live deployment.
+> Note: this window still contains no genuine trending decline. OKX's
+> `history-candles` endpoint only reaches back to around 2026-01 for 15m bars; to
+> test bear behaviour, switch `timeframe` to `1H`/`4H` to buy a longer span.
+> Also note that once a cache file exists, raising `--max-bars` does not backfill
+> older history — pass `--force-download`.
+
+---
+
+## Setting Maximum Capital Usage
+
+Three layers, outermost first:
+
+### 1. Global hard gate (shared by all strategies)
+
+`RISK__MAX_POSITION_PCT` in `.env` caps **notional value per instrument**:
+
+```env
+RISK__MAX_POSITION_PCT=0.3    # per-symbol notional <= 30% of equity
+```
+
+Whatever size a strategy computes, entry legs are truncated to this cap (existing
+position included); if the allowance is exhausted the order is skipped. Closing legs
+are **never** capped — otherwise you would leave an unmanaged remainder. Set `0` to
+disable.
+
+⚠️ The default is `0.1`. A strategy configured with `position_size_pct: 0.2` and
+`leverage: 3` (intending 60% notional) gets truncated to 10%, so **live behaviour
+will diverge from backtests**. The engine warns at startup; either raise the cap or
+lower the strategy's sizing.
+
+### 2. Per-strategy sizing (trend strategies)
+
+`position_size_pct × leverage` is the notional fraction of equity per entry —
+e.g. `0.2 × 3 = 60%`.
+
+### 3. Per-strategy risk budget (PyramidStrategy)
+
+The pyramid is configured by "how much may I lose", not "how much may I spend":
+
+```yaml
+risk_pct: 0.02       # max acceptable loss per round = 2% of equity
+max_leverage: 5      # cap on the implied full-load notional leverage
+```
+
+Capital deployed is an *output*, not an input — a nearer stop buys more size for the
+same risk, a distant stop automatically shrinks it. `max_leverage` bounds that output.
+
+> The layers compose: a strategy sizes by its own rules, then gets truncated by
+> `max_position_pct`. The simplest way to control exposure overall is to set
+> `RISK__MAX_POSITION_PCT` to the largest per-symbol exposure you can stomach and
+> let strategies operate freely inside it.
 
 ---
 

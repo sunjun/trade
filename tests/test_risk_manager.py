@@ -128,3 +128,54 @@ async def test_open_reports_nothing(make_strategy, fake_rest):
     s = make_strategy(RightSideStrategy, rest=fake_rest, risk=risk)
     await s._execute_signal(s._open_long_signal(3000.0, 2700.0))
     assert not risk._daily_loss, "开仓不产生已实现盈亏"
+
+
+# ── 最大使用资金：全局名义价值闸门 ────────────────────────────────────────────
+
+def test_cap_notional_allows_within_limit():
+    r = RiskManager(max_position_pct=0.3)
+    assert r.cap_notional(0.0, 2000.0, 10_000.0) == 2000.0
+
+
+def test_cap_notional_truncates_over_limit():
+    r = RiskManager(max_position_pct=0.3)
+    # 上限 3000，已有 1000，请求 5000 → 只允许 2000
+    assert r.cap_notional(1000.0, 5000.0, 10_000.0) == pytest.approx(2000.0)
+
+
+def test_cap_notional_returns_zero_when_full():
+    r = RiskManager(max_position_pct=0.3)
+    assert r.cap_notional(3000.0, 1000.0, 10_000.0) == 0.0
+
+
+def test_cap_notional_disabled_when_pct_zero():
+    r = RiskManager(max_position_pct=0.0)
+    assert r.cap_notional(0.0, 999_999.0, 10_000.0) == 999_999.0
+
+
+async def test_entry_is_capped_by_max_position(make_strategy, fake_rest):
+    """策略要多少是策略的事，这道闸门保证单品种名义价值不超过权益的既定比例"""
+    from strategies.rightside import RightSideStrategy
+    risk = RiskManager(max_position_pct=0.3)
+    risk.on_equity_update(10_000.0)
+    s = make_strategy(RightSideStrategy, rest=fake_rest, risk=risk,
+                      config={"position_size_pct": 0.5, "leverage": 5})
+
+    await s._execute_signal(s._open_long_signal(3000.0, 2700.0))
+    # 上限 3000 USDT 名义 / (ct_val 0.01 × 3000) = 100 张
+    assert fake_rest.orders[-1].qty == pytest.approx(100.0)
+
+
+async def test_close_is_not_capped(make_strategy, fake_rest):
+    """平仓腿不能被名义上限截断，否则会平不干净留下残仓"""
+    from strategies.rightside import RightSideStrategy
+    risk = RiskManager(max_position_pct=0.01)      # 极紧的上限
+    risk.on_equity_update(10_000.0)
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=500.0,
+                   entry_price=3000.0)
+    s = make_strategy(RightSideStrategy, rest=fake_rest, risk=risk,
+                      portfolio=FakePortfolio(position=pos))
+    s._state.open(PosSide.LONG, 3000.0, 2700.0)
+
+    await s._execute_signal(s._close_signal(3000.0, "close"))
+    assert fake_rest.orders[-1].qty == 500.0

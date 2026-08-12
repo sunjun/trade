@@ -71,6 +71,44 @@ class RiskManager:
         """下单成功后调用，更新频率计数"""
         self._order_timestamps.append(time.monotonic())
 
+    def cap_notional(
+        self,
+        existing_notional: float,
+        requested_notional: float,
+        equity: float,
+        strategy_name: str = "",
+    ) -> float:
+        """按 max_position_pct 限制单品种的名义价值上限，返回允许的新增额度。
+
+        这是「最大使用资金」的全局闸门：不管策略自己算出多大的仓位，
+        单个品种的名义价值（含已有持仓）都不会超过 权益 × max_position_pct。
+        返回值可能为 0，表示这一单该被跳过。
+        """
+        if equity <= 0 or self._max_position_pct <= 0:
+            return requested_notional
+
+        cap = equity * self._max_position_pct
+        room = cap - existing_notional
+        if room <= 0:
+            logger.warning(
+                f"[RiskManager] {strategy_name} 已达单品种名义上限 "
+                f"{cap:.2f} USDT（当前 {existing_notional:.2f}），跳过本单"
+            )
+            return 0.0
+        if requested_notional <= room:
+            return requested_notional
+
+        logger.warning(
+            f"[RiskManager] {strategy_name} 请求名义 {requested_notional:.2f} USDT "
+            f"超出剩余额度 {room:.2f}（上限 {cap:.2f} = 权益 {equity:.2f} × "
+            f"{self._max_position_pct:.0%}），按额度截断"
+        )
+        return room
+
+    @property
+    def max_position_pct(self) -> float:
+        return self._max_position_pct
+
     def on_realized_pnl(self, strategy_name: str, pnl: float):
         """策略平仓/减仓下单成功后调用，累计日内亏损并在超限时暂停该策略。
 

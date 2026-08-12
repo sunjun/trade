@@ -1,57 +1,98 @@
-"""金字塔加仓策略"""
+"""金字塔加仓策略：风险反推仓位、三道出场、首仓过滤"""
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 import pytest
 
-from gateway.models import Candle, Order, OrderSide, OrderStatus, OrderType, Position, PosSide
-from strategies.pyramid import PyramidStrategy, pyramid_margin_ratios
+from gateway.models import (
+    Candle,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    PosSide,
+)
+from strategies.pyramid import PyramidStrategy, plan_ladder, pyramid_weights
 from tests.conftest import ETH_SWAP, FakePortfolio
 
+CT_VAL = 0.01
 
-def test_margin_ratios_sum_to_one():
-    """无论怎么配，加满恰好用尽预算，不会超额"""
+
+# ── 权重与阶梯规划 ────────────────────────────────────────────────────────────
+
+def test_weights_sum_to_one():
     for steps in (3, 6, 10):
         for ratio in (1.0, 1.2, 1.3, 2.0):
-            r = pyramid_margin_ratios(steps, ratio)
-            assert len(r) == steps
-            assert sum(r) == pytest.approx(1.0)
-            assert all(x > 0 for x in r)
+            w = pyramid_weights(steps, ratio)
+            assert len(w) == steps
+            assert sum(w) == pytest.approx(1.0)
+            assert all(x > 0 for x in w)
 
 
-def test_margin_ratios_are_increasing():
-    r = pyramid_margin_ratios(6, 1.3)
-    assert all(r[i] < r[i + 1] for i in range(len(r) - 1)), "正金字塔应逐档加大"
-    # 末档接近首档的 1.3^5 ≈ 3.7 倍
-    assert r[-1] / r[0] == pytest.approx(1.3 ** 5)
+def test_weights_increase():
+    w = pyramid_weights(6, 1.3)
+    assert all(w[i] < w[i + 1] for i in range(len(w) - 1))
+    assert w[-1] / w[0] == pytest.approx(1.3 ** 5)
 
 
-def test_rejects_short_tp_schedule(make_strategy):
-    with pytest.raises(ValueError, match="tp_schedule"):
-        make_strategy(PyramidStrategy, config={"max_steps": 6, "tp_schedule": [0.01]})
+def test_plan_ladder_spends_exactly_the_risk_budget():
+    """加满所有档、跌到止损价时，亏损应恰好等于预算"""
+    weights = pyramid_weights(6, 1.3)
+    entries = [100.0, 96.0, 92.0, 88.0, 84.0, 80.0]
+    stop, budget = 78.0, 200.0
 
+    qty = plan_ladder(weights, entries, stop, budget, CT_VAL)
+
+    loss = sum(q * (e - stop) * CT_VAL for q, e in zip(qty, entries, strict=True))
+    assert loss == pytest.approx(budget)
+
+
+def test_plan_ladder_loss_is_monotonic_in_step():
+    """任何更早的档位，亏损都严格小于预算——保护强度随暴露单调递增。
+
+    这正是原实现（固定 USDT 金额止损）做不到的：浅档要跌 38% 才触发、
+    形同虚设，满档 3% 就触发、一碰就停。
+    """
+    weights = pyramid_weights(6, 1.3)
+    entries = [100.0, 96.0, 92.0, 88.0, 84.0, 80.0]
+    stop, budget = 78.0, 200.0
+    qty = plan_ladder(weights, entries, stop, budget, CT_VAL)
+
+    losses = [
+        sum(qty[i] * (entries[i] - stop) * CT_VAL for i in range(step))
+        for step in range(1, 7)
+    ]
+    assert all(a < b for a, b in pairwise(losses))
+    assert losses[-1] == pytest.approx(budget)
+    assert all(x < budget for x in losses[:-1])
+
+
+def test_plan_ladder_rejects_stop_above_entries():
+    assert plan_ladder([1.0], [100.0], 120.0, 100.0, CT_VAL) == []
+
+
+# ── 夹具 ──────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def pyramid(make_strategy, fake_rest):
-    s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+    return make_strategy(PyramidStrategy, rest=fake_rest, config={
         "timeframe": "15m", "max_steps": 6, "pyramid_ratio": 1.3,
-        "capital_pct": 0.5, "leverage": 5, "stop_loss_pct": 0.15,
+        "risk_pct": 0.02, "max_leverage": 5, "stop_atr_mult": 1.5,
         "atr_multiplier": 1.2, "fib_lookback": 20,
+        "ema_fast": 3, "ema_slow": 5, "max_hold_bars": 10,
     })
-    return s
 
 
-async def _warm_higher(s, high=4000.0, low=3000.0, n=20):
-    """喂 n 根高时框K线，构造一段从 high 缓慢跌到 low 的区间。
-
-    n 必须 <= fib_lookback，否则最早那根（含区间最高点）会被挤出回看窗口。
-    """
+async def _warm_higher(s, high=4000.0, low=3000.0, n=20, rising=False):
+    """喂 n 根高时框K线。rising=True 构造上升趋势（让趋势过滤通过）。"""
     assert n <= s._fib_lookback
     t0 = datetime(2026, 1, 1, tzinfo=UTC)
     span = (high - low) / n
     for i in range(n):
-        top = high - span * i
+        top = low + span * (i + 1) if rising else high - span * i
         c = Candle(ts=t0 + timedelta(hours=4 * i), open=top, high=top,
-                   low=top - span, close=top - span,
+                   low=top - span, close=top - span * 0.1,
                    volume=100.0, confirmed=True)
         await s._handle_higher_tf([c])
     s.on_extra_tf_warmed(s._higher_tf)
@@ -63,136 +104,230 @@ def _m15(close, i=0):
                   volume=10.0, confirmed=True)
 
 
-async def _fill(s, price, qty):
+async def _fill(s, price, qty, side=OrderSide.BUY):
     await s.on_order_update(Order(
-        inst_id=ETH_SWAP, side=OrderSide.BUY, order_type=OrderType.MARKET,
+        inst_id=ETH_SWAP, side=side, order_type=OrderType.MARKET,
         qty=qty, order_id=f"o{s._step}", status=OrderStatus.FILLED,
         filled_qty=qty, avg_fill_price=price))
 
 
-async def test_supports_are_fibonacci_of_range(pyramid):
-    await _warm_higher(pyramid, high=4000.0, low=3000.0)
-    supports = pyramid._supports
-    assert supports == sorted(supports, reverse=True), "应从高到低排列"
-    assert supports[0] == pytest.approx(4000 - 1000 * 0.236)
-    assert supports[-1] == pytest.approx(3000.0), "最后一档是前低"
+# ── 首仓过滤 ──────────────────────────────────────────────────────────────────
+
+async def test_no_entry_when_trend_is_down(pyramid):
+    """马丁最大的死法是在下跌趋势里启动一整轮"""
+    await _warm_higher(pyramid, rising=False)
+    assert pyramid._trend_ok() is False
+    assert await pyramid.on_candle(_m15(pyramid._supports[0] - 1)) == []
 
 
-async def test_first_entry_is_unconditional(pyramid):
-    await _warm_higher(pyramid)
-    signals = await pyramid.on_candle(_m15(3990.0))
+async def test_no_entry_before_price_reaches_first_support(pyramid):
+    """首仓也要等回调——它决定整轮成本基准，
+    不该是"机器人启动时价格在哪就在哪买" """
+    await _warm_higher(pyramid, rising=True)
+    assert pyramid._trend_ok() is True
+    assert await pyramid.on_candle(_m15(pyramid._supports[0] + 10)) == []
+
+
+async def test_first_entry_when_trend_up_and_at_support(pyramid):
+    await _warm_higher(pyramid, rising=True)
+    signals = await pyramid.on_candle(_m15(pyramid._supports[0] - 1))
     assert len(signals) == 1
     assert signals[0].side == OrderSide.BUY
     assert signals[0].reduce_only is False
-    assert signals[0].qty == 0, "数量由 _calc_qty 按当档预算填充"
 
 
-async def test_no_signal_before_higher_tf_ready(pyramid):
-    assert await pyramid.on_candle(_m15(3990.0)) == []
+async def test_filters_can_be_disabled(make_strategy, fake_rest):
+    s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+        "fib_lookback": 20, "trend_filter": False, "first_entry_at_support": False,
+        "ema_fast": 3, "ema_slow": 5,
+    })
+    await _warm_higher(s, rising=False)
+    assert len(await s.on_candle(_m15(3990.0))) == 1
 
 
-async def test_add_requires_both_support_and_atr_gap(pyramid):
-    await _warm_higher(pyramid, high=4000.0, low=3000.0)
-    await pyramid.on_candle(_m15(3990.0))
-    await _fill(pyramid, 3990.0, 100)
+# ── 风险预算反推仓位 ──────────────────────────────────────────────────────────
+
+async def test_round_planning_sets_stop_and_ladder(pyramid):
+    await _warm_higher(pyramid, rising=True)
+    assert await pyramid._plan_round(pyramid._supports[0] - 1) is True
+    assert pyramid._stop_price == pytest.approx(
+        min(pyramid._supports) - 1.5 * pyramid._atr.value)
+    assert len(pyramid._step_qty) == pyramid._max_steps
+    assert all(q > 0 for q in pyramid._step_qty)
+
+
+async def test_worst_case_loss_equals_budget(pyramid):
+    """开仓前就能算出最坏情况——这是能不能上实盘的分界线"""
+    await _warm_higher(pyramid, rising=True)
+    price = pyramid._supports[0] - 1
+    await pyramid._plan_round(price)
+
+    entries = pyramid._planned_entries(price)
+    loss = sum(q * (e - pyramid._stop_price) * CT_VAL
+               for q, e in zip(pyramid._step_qty, entries, strict=True))
+    budget = pyramid._portfolio.get_total_equity() * pyramid._risk_pct
+    assert loss == pytest.approx(budget)
+
+
+async def test_round_rejected_when_leverage_exceeds_cap(make_strategy, fake_rest):
+    """止损太远会要求过大仓位，此时应放弃这一轮而不是硬上"""
+    s = make_strategy(PyramidStrategy, rest=fake_rest, config={
+        "fib_lookback": 20, "risk_pct": 0.9, "max_leverage": 1.0,
+        "ema_fast": 3, "ema_slow": 5,
+    })
+    await _warm_higher(s, rising=True)
+    assert await s._plan_round(s._supports[0] - 1) is False
+    assert s._step_qty == []
+
+
+async def test_calc_qty_uses_planned_tranche(pyramid):
+    await _warm_higher(pyramid, rising=True)
+    await pyramid._plan_round(pyramid._supports[0] - 1)
+    qty = await pyramid._calc_qty(pyramid._entry_signal("t"))
+    assert qty == pytest.approx(float(int(pyramid._step_qty[0])))   # lot_sz = 1
+
+
+async def test_calc_qty_zero_without_plan(pyramid):
+    await _warm_higher(pyramid, rising=True)
+    assert await pyramid._calc_qty(pyramid._entry_signal("t")) == 0.0
+
+
+# ── 加仓 ──────────────────────────────────────────────────────────────────────
+
+async def test_add_requires_support_and_atr_gap(pyramid):
+    await _warm_higher(pyramid, rising=True)
+    entry = pyramid._supports[0] - 1
+    await pyramid.on_candle(_m15(entry))
+    await _fill(pyramid, entry, 100)
     assert pyramid._step == 1
 
     support = pyramid._supports[1]
-    atr_gap = pyramid._atr.value * pyramid._atr_mult
+    gap = pyramid._atr.value * pyramid._atr_mult
 
-    # 只到支撑位、但离上次成交不足一个 ATR 间隔 → 不加
-    # （把上次成交价挪到支撑位上方，让 ATR 间隔成为约束条件）
-    pyramid._last_entry_price = support + atr_gap * 0.5
+    # 到了支撑，但离上次成交不足一个 ATR 间隔
+    pyramid._last_entry_price = support + gap * 0.5
     assert await pyramid.on_candle(_m15(support)) == []
 
-    # 只满足 ATR 间隔、但还没跌到支撑位 → 不加
-    pyramid._last_entry_price = 3990.0
+    # 满足间隔，但还没跌到支撑
+    pyramid._last_entry_price = entry
     assert await pyramid.on_candle(_m15(support + 1)) == []
 
-    # 两个条件同时满足 → 加仓
+    # 两者都满足
     signals = await pyramid.on_candle(_m15(support - 1))
-    assert len(signals) == 1
-    assert signals[0].side == OrderSide.BUY
-    assert signals[0].reduce_only is False
+    assert len(signals) == 1 and signals[0].side == OrderSide.BUY
 
 
-async def test_average_entry_and_step_tracking(pyramid):
-    await _warm_higher(pyramid)
-    await _fill(pyramid, 4000.0, 100)
-    await _fill(pyramid, 3800.0, 100)
-    assert pyramid._step == 2
-    assert pyramid._total_qty == 200
-    assert pyramid._avg_entry == pytest.approx(3900.0)
-    assert pyramid._last_entry_price == 3800.0
-
-
-async def test_stops_adding_at_max_steps(pyramid):
-    await _warm_higher(pyramid)
+async def test_stops_adding_at_max_step(pyramid):
+    await _warm_higher(pyramid, rising=True)
+    await pyramid.on_candle(_m15(pyramid._supports[0] - 1))
     for i in range(pyramid._max_steps):
-        await _fill(pyramid, 4000.0 - i * 200, 100)
+        await _fill(pyramid, 3900.0 - i * 100, 10)
     assert pyramid._step == pyramid._max_steps
-
-    # 跌到最深也不再加仓
-    assert not [s for s in await pyramid.on_candle(_m15(2000.0))
+    assert not [s for s in await pyramid.on_candle(_m15(1000.0))
                 if s.side == OrderSide.BUY]
 
 
-async def test_tiered_take_profit(pyramid, fake_rest):
+# ── 三道出场 ──────────────────────────────────────────────────────────────────
+
+async def test_structural_stop(pyramid):
     pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=100.0,
-                   entry_price=4000.0)
+                   entry_price=3500.0)
     pyramid._portfolio = FakePortfolio(position=pos)
-    await _warm_higher(pyramid)
-    await _fill(pyramid, 4000.0, 100)
-    pyramid._ct_val = 0.01
+    await _warm_higher(pyramid, rising=True)
+    entry = pyramid._supports[0] - 1
+    await pyramid.on_candle(_m15(entry))
+    await _fill(pyramid, entry, 100)
 
-    tp_rate = pyramid._tp_schedule[0]
-    assert await pyramid.on_candle(_m15(4000.0 * (1 + tp_rate) - 1)) == []
+    stop = pyramid._stop_price
+    assert not [x for x in await pyramid.on_candle(_m15(stop + 1)) if x.reduce_only]
 
-    signals = await pyramid.on_candle(_m15(4000.0 * (1 + tp_rate) + 1))
-    assert len(signals) == 1
-    assert signals[0].reduce_only is True
-    assert signals[0].qty == 100.0, "全平，数量取交易所真实持仓"
-    assert pyramid._step == 0, "止盈后重置，可开始新一轮"
-
-
-async def test_hard_stop_on_total_drawdown(pyramid):
-    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=100.0,
-                   entry_price=4000.0)
-    pyramid._portfolio = FakePortfolio(position=pos, equity=10_000.0)
-    await _warm_higher(pyramid)
-    await pyramid.on_candle(_m15(4000.0))       # 触发 _calc_qty 前先建仓
-    await _fill(pyramid, 4000.0, 100)
-    pyramid._ct_val = 0.01
-    pyramid._committed = 5000.0                  # capital_pct=0.5 × 10000
-
-    # 浮亏 = (price-4000) × 100 × 0.01；-750 需要跌 750 点
-    sigs = await pyramid.on_candle(_m15(3400.0))
-    assert not [x for x in sigs if x.reduce_only], "浮亏 -600，未到 -750，不该平仓"
-
-    signals = await pyramid.on_candle(_m15(3200.0))   # 浮亏 -800
+    signals = await pyramid.on_candle(_m15(stop - 1))
     assert len(signals) == 1 and signals[0].reduce_only is True
     assert pyramid._step == 0
 
 
-async def test_zero_committed_does_not_stop_out_instantly(pyramid):
-    """_committed 若为 0，止损阈值会退化成 0——任何浮亏都立刻全平"""
-    pyramid._portfolio = FakePortfolio(equity=10_000.0)
-    await _warm_higher(pyramid)
-    await _fill(pyramid, 4000.0, 100)
-    pyramid._ct_val = 0.01
-    assert pyramid._committed == 0.0
+async def test_max_hold_timeout(pyramid):
+    """马丁的真正死法是被困住，给暴露时间加个上界"""
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=100.0,
+                   entry_price=3500.0)
+    pyramid._portfolio = FakePortfolio(position=pos)
+    await _warm_higher(pyramid, rising=True)
+    await pyramid.on_candle(_m15(pyramid._supports[0] - 1))
+    for i in range(pyramid._max_steps):
+        await _fill(pyramid, 3500.0 - i, 10)
+    assert pyramid._step == pyramid._max_steps
 
-    sigs = await pyramid.on_candle(_m15(3999.0))     # 浮亏仅 -1 USDT
-    assert not [x for x in sigs if x.reduce_only], "不该因阈值退化而立刻止损"
-    assert pyramid._committed == pytest.approx(5000.0), "应按权益回填"
+    # 价格卡在止损与止盈之间横盘，只有超时能让它离场
+    idle = (pyramid._stop_price + pyramid._avg_entry) / 2
+    for i in range(pyramid._max_hold_bars - 1):
+        assert not [x for x in await pyramid.on_candle(_m15(idle, i)) if x.reduce_only]
+
+    signals = await pyramid.on_candle(_m15(idle, 99))
+    assert len(signals) == 1 and signals[0].reduce_only is True
+    assert "timeout" in signals[0].reason.lower()
+
+
+def test_tp_schedule_is_decreasing(pyramid):
+    """深档的目标是逃出来并重置，不是把利润最大化"""
+    sched = pyramid._tp_schedule[:pyramid._max_steps]
+    assert all(a > b for a, b in pairwise(sched))
+
+
+async def test_partial_take_profit_trims_deepest_tranche(pyramid):
+    """反弹先平最深一档，立刻降暴露，而不是死等一个大目标全平"""
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=300.0,
+                   entry_price=3500.0)
+    pyramid._portfolio = FakePortfolio(position=pos)
+    await _warm_higher(pyramid, rising=True)
+    await pyramid.on_candle(_m15(pyramid._supports[0] - 1))
+    await _fill(pyramid, 3600.0, 100)
+    await _fill(pyramid, 3500.0, 200)
+    assert pyramid._step == 2
+    avg_before = pyramid._avg_entry
+
+    target = pyramid._avg_entry * (1 + pyramid._tp_schedule[1])
+    signals = await pyramid.on_candle(_m15(target + 1))
+    assert len(signals) == 1
+    assert signals[0].reduce_only is True
+    assert signals[0].qty == pytest.approx(pyramid._step_qty[1])
+    assert pyramid._step == 2, "减仓要等成交回报才回退档位"
+
+    await _fill(pyramid, target, signals[0].qty, side=OrderSide.SELL)
+    assert pyramid._step == 1, "成交后回退一档"
+    assert pyramid._avg_entry == pytest.approx(avg_before), "平的是最深一笔，均价不变"
+
+
+async def test_full_close_at_first_step(pyramid):
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=100.0,
+                   entry_price=3500.0)
+    pyramid._portfolio = FakePortfolio(position=pos)
+    await _warm_higher(pyramid, rising=True)
+    await pyramid.on_candle(_m15(pyramid._supports[0] - 1))
+    await _fill(pyramid, 3500.0, 100)
+
+    target = 3500.0 * (1 + pyramid._tp_schedule[0])
+    signals = await pyramid.on_candle(_m15(target + 1))
+    assert len(signals) == 1
+    assert signals[0].qty == 100.0, "第一档止盈全平"
+    assert pyramid._step == 0
+
+
+# ── 交易所侧止损 / 接管 / 其他 ────────────────────────────────────────────────
+
+async def test_entries_carry_shared_stop_price(pyramid):
+    """各档共用同一个结构止损价，交易所侧的附加止损会一起触发，
+    不会退化成阶梯式的部分止损"""
+    await _warm_higher(pyramid, rising=True)
+    await pyramid._plan_round(pyramid._supports[0] - 1)
+    assert pyramid._entry_signal("t").stop_loss == pytest.approx(pyramid._stop_price)
 
 
 async def test_supports_freeze_once_in_position(pyramid):
-    await _warm_higher(pyramid, high=4000.0, low=3000.0)
+    await _warm_higher(pyramid, rising=True)
+    await pyramid.on_candle(_m15(pyramid._supports[0] - 1))
+    await _fill(pyramid, 3900.0, 100)
     before = list(pyramid._supports)
-    await _fill(pyramid, 3990.0, 100)
 
-    # 持仓期间高时框继续走低，支撑阶梯不应变动
     t0 = datetime(2026, 3, 1, tzinfo=UTC)
     for i in range(10):
         await pyramid._handle_higher_tf([Candle(
@@ -202,66 +337,52 @@ async def test_supports_freeze_once_in_position(pyramid):
 
 
 async def test_supports_refresh_while_flat(pyramid):
-    await _warm_higher(pyramid, high=4000.0, low=3000.0)
+    await _warm_higher(pyramid, rising=True)
     before = list(pyramid._supports)
     t0 = datetime(2026, 3, 1, tzinfo=UTC)
     for i in range(25):
         await pyramid._handle_higher_tf([Candle(
             ts=t0 + timedelta(hours=4 * i), open=2000, high=2000, low=1000,
             close=1500, volume=1.0, confirmed=True)])
-    assert pyramid._supports != before, "空仓时应跟随行情刷新"
+    assert pyramid._supports != before
 
 
 async def test_unconfirmed_candles_ignored(pyramid):
-    await _warm_higher(pyramid)
-    c = _m15(3990.0)
+    await _warm_higher(pyramid, rising=True)
+    c = _m15(pyramid._supports[0] - 1)
     c.confirmed = False
     assert await pyramid.on_candle(c) == []
 
 
 async def test_adopt_assumes_max_step(pyramid):
-    """重启后档位未知，按已加满处理——宁可少赚也不要超预算加仓"""
-    await _warm_higher(pyramid)
+    await _warm_higher(pyramid, rising=True)
     pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=300.0,
                    entry_price=3500.0)
     assert pyramid.adopt_position(pos) is True
     assert pyramid._step == pyramid._max_steps
-    assert pyramid._total_qty == 300.0
-    assert pyramid._avg_entry == 3500.0
+    assert pyramid._stop_price == pytest.approx(pyramid._invalidation_price())
     assert not pyramid._state.flat
 
 
-async def test_margin_budget_is_snapshotted(pyramid, fake_rest):
-    """浮亏不应让后续档位的预算跟着缩水"""
-    pyramid._portfolio = FakePortfolio(equity=10_000.0)
-    await _warm_higher(pyramid)
-
-    sig = pyramid._entry_signal(step=0, reason="t")
-    qty0 = await pyramid._calc_qty(sig)
-    assert pyramid._committed == pytest.approx(5000.0)
-
-    await _fill(pyramid, 4000.0, qty0)
-    pyramid._portfolio._equity = 4000.0        # 账户浮亏
-
-    sig2 = pyramid._entry_signal(step=1, reason="t")
-    qty1 = await pyramid._calc_qty(sig2)
-    raw = 5000.0 * pyramid._margin_ratios[1] * 5 / (0.01 * 3000.0)
-    assert qty1 == pytest.approx(float(int(raw))), "应按 lot_sz=1 向下取整"
-    assert qty1 > qty0, "第二档保证金应大于第一档"
+def test_adopt_refused_before_warmup(pyramid):
+    """支撑位/ATR 未就绪时无法重建止损，拒绝接管而不是塞个 0 进去"""
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=300.0,
+                   entry_price=3500.0)
+    assert pyramid.adopt_position(pos) is False
+    assert pyramid._state.flat
 
 
-def test_extra_tf_configs_is_accessible():
+def test_rejects_short_tp_schedule(make_strategy):
+    with pytest.raises(ValueError, match="tp_schedule"):
+        make_strategy(PyramidStrategy, config={"max_steps": 6, "tp_schedule": [0.01]})
+
+
+def test_extra_tf_configs_is_accessible(pyramid):
     """这个 property 曾因内部访问 RunningATR.period（当时不存在）而抛
     AttributeError，被引擎的 hasattr() 静默吞掉，导致高时框数据完全不喂。"""
-    from strategies._indicators import RunningATR
-    assert RunningATR(14).period == 14
-
-
-async def test_extra_tf_configs_declares_higher_tf(pyramid):
+    assert hasattr(pyramid, "extra_tf_configs")
     cfgs = pyramid.extra_tf_configs
     assert len(cfgs) == 1
-    tf, warm, handler = cfgs[0]
+    tf, _warm, handler = cfgs[0]
     assert tf == "4H"
-    assert warm > pyramid._fib_lookback
     assert handler == pyramid._handle_higher_tf
-    assert hasattr(pyramid, "extra_tf_configs"), "hasattr 不能因内部异常而返回 False"

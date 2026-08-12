@@ -257,17 +257,34 @@ class StrategyEngine:
         )
 
     def _warn_if_risk_limits_too_tight(self, strategy):
-        """单笔止损打满就会触发熔断时告警——风控阈值与策略仓位/杠杆不匹配。
+        """风控阈值与策略仓位不匹配时告警。
 
+        两类检查：
+          1. 名义价值是否会被 max_position_pct 截断（策略实际下的量比配置的小）
+          2. 单笔止损打满是否直接触发日内亏损/回撤熔断
         只对固定百分比止损（sl_pct）的策略静态估算；ATR 止损无法事先算出。
         """
-        sl_pct = strategy.config.get("sl_pct")
-        if not sl_pct:
-            return
-        pct = strategy.config.get("position_size_pct", 0.1)
-        lev = strategy.config.get("leverage", 1) if strategy.inst_type == InstType.SWAP else 1
-        worst = pct * lev * sl_pct  # 单笔止损打满占账户权益的比例
         risk_cfg = self._settings.risk
+        pct = strategy.config.get("position_size_pct")
+        lev = strategy.config.get("leverage", 1) if strategy.inst_type == InstType.SWAP else 1
+
+        # ── 1. 名义价值上限 ───────────────────────────────────────────────────
+        if pct:
+            notional_pct = pct * lev
+            if notional_pct > risk_cfg.max_position_pct:
+                logger.warning(
+                    f"[{strategy.name}] 仓位会被全局上限截断：配置意图 "
+                    f"{pct:.0%} × {lev}x = 权益的 {notional_pct:.0%} 名义价值，"
+                    f"但 RISK__MAX_POSITION_PCT={risk_cfg.max_position_pct:.0%}。"
+                    f"实际下单量会按上限缩减 {notional_pct / risk_cfg.max_position_pct:.1f} 倍——"
+                    f"要么调高该上限，要么调低策略仓位，否则实盘表现与回测不一致"
+                )
+
+        # ── 2. 单笔止损 vs 熔断阈值 ───────────────────────────────────────────
+        sl_pct = strategy.config.get("sl_pct")
+        if not sl_pct or not pct:
+            return
+        worst = pct * lev * sl_pct  # 单笔止损打满占账户权益的比例
 
         if worst >= risk_cfg.max_daily_loss_pct or worst >= risk_cfg.max_drawdown_pct:
             logger.warning(
