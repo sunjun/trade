@@ -18,7 +18,7 @@ import asyncio
 import importlib
 import sys
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 from backtest.data_loader import fetch_all_candles
 from backtest.engine import BacktestEngine
 from backtest.report import _calc_metrics, export_trades_csv, plot_results, print_report
-from gateway.models import InstType, InstrumentInfo
+from gateway.models import InstrumentInfo, InstType
 
 # ── 合约静态信息表（与 run_backtest.py 保持同步）─────────────────────────────
 INST_INFO_MAP: dict[str, InstrumentInfo] = {
@@ -330,11 +330,11 @@ async def run_all(args: argparse.Namespace) -> None:
             print_report(result["metrics"])  # 实时打印单策略报告
 
     # ── 写统一日志文件 ────────────────────────────────────────────────────────
-    ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     log_path = out_dir / f"all_backtest_{ts_str}.log"
 
     with open(log_path, "w", encoding="utf-8") as f:
-        f.write(f"All Strategies Backtest Report\n")
+        f.write("All Strategies Backtest Report\n")
         f.write(f"Generated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Capital   : {args.capital:.2f} USDT\n")
         f.write(f"Max Bars  : {args.max_bars}\n")

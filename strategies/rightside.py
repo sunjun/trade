@@ -20,7 +20,14 @@ from loguru import logger
 
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
-    Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal,
+    Candle,
+    InstType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PosSide,
+    Signal,
 )
 from strategies._base_state import PositionState, build_close_signal
 from strategies._indicators import RunningATR, RunningEMA, RunningMACD
@@ -114,7 +121,7 @@ class RightSideStrategy(BaseStrategy):
         es   = self._ema_slow.value
         hist = self._macd.hist
         atr  = self._atr.value
-        vmа  = self._vol_ma.value
+        vma  = self._vol_ma.value
         tf   = self.config.get("timeframe", "?")
 
         # ── 调试日志 ─────────────────────────────────────────────────────────
@@ -133,7 +140,7 @@ class RightSideStrategy(BaseStrategy):
         logger.debug(
             f"[{self.name}] {candle.ts.strftime('%m-%d %H:%M')} [{tf}] "
             f"O={candle.open:.4f} H={candle.high:.4f} L={candle.low:.4f} C={close:.4f} "
-            f"V={volume:.2f}(avg={vmа:.2f}) | "
+            f"V={volume:.2f}(avg={vma:.2f}) | "
             f"EMA{self._ema_fast.period}={ef:.4f} EMA{self._ema_slow.period}={es:.4f} "
             f"hist={hist:+.6f} ATR={atr:.4f} | {pos_str}"
         )
@@ -174,14 +181,14 @@ class RightSideStrategy(BaseStrategy):
         cooldown_ok  = self._candles_since_trade >= self._cooldown_candles
 
         # 量价齐升确认：当前成交量 >= 均量 × 阈值
-        vol_surge    = (volume >= vmа * self._vol_threshold)
+        vol_surge    = (volume >= vma * self._vol_threshold)
 
         if golden_cross or death_cross:
             cross_type = "GOLDEN ▲" if golden_cross else "DEATH ▼"
             logger.info(
                 f"[{self.name}] {cross_type} | "
                 f"EMA_fast={ef:.4f} EMA_slow={es:.4f} hist={hist:+.6f} "
-                f"vol={volume:.2f}/avg={vmа:.2f}({volume/vmа:.1f}x) "
+                f"vol={volume:.2f}/avg={vma:.2f}({volume/vma:.1f}x) "
                 f"vol_surge={'YES' if vol_surge else 'NO'} "
                 f"cooldown={'OK' if cooldown_ok else f'wait {self._cooldown_candles - self._candles_since_trade}K'}"
             )
@@ -198,7 +205,7 @@ class RightSideStrategy(BaseStrategy):
                 self._candles_since_trade = 0
                 logger.info(
                     f"[{self.name}] LONG ENTRY @ {close:.4f} | "
-                    f"SL={sl:.4f} ({self._sl_pct:.1%}) vol={volume:.2f}({volume/vmа:.1f}x)"
+                    f"SL={sl:.4f} ({self._sl_pct:.1%}) vol={volume:.2f}({volume/vma:.1f}x)"
                 )
 
             # 空头入场（仅合约）：死叉 + MACD<0 + 量价放大 + 冷却完毕
@@ -211,7 +218,7 @@ class RightSideStrategy(BaseStrategy):
                 self._candles_since_trade = 0
                 logger.info(
                     f"[{self.name}] SHORT ENTRY @ {close:.4f} | "
-                    f"SL={sl:.4f} ({self._sl_pct:.1%}) vol={volume:.2f}({volume/vmа:.1f}x)"
+                    f"SL={sl:.4f} ({self._sl_pct:.1%}) vol={volume:.2f}({volume/vma:.1f}x)"
                 )
 
         else:
@@ -408,6 +415,7 @@ class RightSideStrategy(BaseStrategy):
             order_type=OrderType.MARKET,
             qty=reduce_qty,
             pos_side=pos_side,
+            reduce_only=True,
             reason=reason,
         )
 

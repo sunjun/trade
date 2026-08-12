@@ -13,11 +13,14 @@ import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # ── matplotlib backend 必须在 pyplot 之前设置 ──────────────────────────────────
 import matplotlib
+
 matplotlib.use('TkAgg')
+
+import tkinter as tk
+from tkinter import messagebox, scrolledtext, ttk
 
 import matplotlib.animation as animation
 import matplotlib.patches as mpatches
@@ -25,13 +28,11 @@ import matplotlib.transforms as mtrans
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
-
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from config.settings import settings
@@ -39,6 +40,7 @@ from gateway.models import Candle
 from gateway.okx_rest import OKXRestClient
 from gateway.okx_ws import OKXWebSocketClient
 from storage.db import Database
+from strategies._indicators import ema_series
 
 # ── 颜色主题（与 chart.py 保持一致）──────────────────────────────────────────
 BG      = '#131722'
@@ -101,23 +103,6 @@ class AsyncBridge:
         self._loop.call_soon_threadsafe(self._loop.stop)
 
 
-# ── EMA 计算（复用 chart.py 逻辑）────────────────────────────────────────────
-
-def _ema(closes: list[float], period: int) -> list[Optional[float]]:
-    k = 2.0 / (period + 1)
-    result: list[Optional[float]] = [None] * len(closes)
-    val: Optional[float] = None
-    seed: list[float] = []
-    for i, c in enumerate(closes):
-        if val is None:
-            seed.append(c)
-            if len(seed) == period:
-                val = sum(seed) / period
-                result[i] = val
-        else:
-            val = c * k + val * (1 - k)
-            result[i] = val
-    return result
 
 
 # ── 图表状态（线程安全）──────────────────────────────────────────────────────
@@ -155,7 +140,7 @@ def _draw_chart(ax_c, ax_v, state: ChartState):
 
     n = len(candles)
     closes = [c.close for c in candles]
-    emas = {p: _ema(closes, p) for p in state.ema_periods}
+    emas = {p: ema_series(closes, p) for p in state.ema_periods}
     ema_colors = {p: EMA_COLORS[i % len(EMA_COLORS)]
                   for i, p in enumerate(state.ema_periods)}
 
@@ -268,7 +253,7 @@ class TradeApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self._bridge = AsyncBridge()
-        self._engine_proc: Optional[subprocess.Popen] = None
+        self._engine_proc: subprocess.Popen | None = None
         self._log_queue: queue.Queue = queue.Queue()
         self._chart_state = ChartState()
         self._chart_session = 0   # 每次加载新图递增，用于判断 WS 是否过期
@@ -648,7 +633,7 @@ class TradeApp(tk.Tk):
             return
         if event.xdata is None:
             return
-        idx = int(round(event.xdata))
+        idx = round(event.xdata)
         n = len(state.buf)
         new_idx = idx if 0 <= idx < n else None
         if new_idx == state.selected['idx']:
@@ -665,7 +650,7 @@ class TradeApp(tk.Tk):
         ttk.Label(fb, text='策略:').pack(side='left', padx=(0, 4))
         self._ord_strategy = tk.StringVar(value='全部')
         ttk.Combobox(fb, textvariable=self._ord_strategy,
-                     values=['全部'] + self._strategy_names,
+                     values=['全部', *self._strategy_names],
                      width=22).pack(side='left', padx=(0, 10))
 
         ttk.Label(fb, text='条数:').pack(side='left', padx=(0, 4))
@@ -728,7 +713,7 @@ class TradeApp(tk.Tk):
         ttk.Label(fb, text='策略:').pack(side='left', padx=(0, 4))
         self._sig_strategy = tk.StringVar(value='全部')
         ttk.Combobox(fb, textvariable=self._sig_strategy,
-                     values=['全部'] + self._strategy_names,
+                     values=['全部', *self._strategy_names],
                      width=22).pack(side='left', padx=(0, 10))
 
         ttk.Label(fb, text='条数:').pack(side='left', padx=(0, 4))

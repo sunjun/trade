@@ -101,7 +101,7 @@ class Portfolio:
     def summary(self) -> str:
         lines = [f"Equity: {self._total_equity:.2f} USDT",
                  f"Available: {self.get_available():.2f} USDT"]
-        for key, pos in self._positions.items():
+        for pos in self._positions.values():
             lines.append(
                 f"  {pos.inst_id} {pos.pos_side.value}: "
                 f"sz={pos.size} entry={pos.entry_price:.4f} "

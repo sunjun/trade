@@ -1,6 +1,6 @@
 """策略通用持仓状态机 + 平仓信号构造工具"""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -40,7 +40,7 @@ def build_close_signal(
     can_short: bool,
     reason: str,
     strategy_name: str = "",
-) -> Optional[Signal]:
+) -> Signal | None:
     """根据当前持仓方向构造市价平仓信号。若 portfolio 无该品种持仓则返回 None。
     注：现货无法做空，平多时 pos_side = NET。
     """
@@ -66,5 +66,6 @@ def build_close_signal(
         order_type=OrderType.MARKET,
         qty=qty,
         pos_side=pos_side,
+        reduce_only=True,
         reason=reason,
     )

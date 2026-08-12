@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from gateway.models import Candle, InstType, Order, PosSide, Position, Signal
+from gateway.models import Candle, InstType, Order, Position, PosSide, Signal
+from gateway.precision import round_qty
 
 # clOrdId 中标识策略的前缀长度（8 位可读名 + 4 位哈希）
 CLIENT_TAG_LEN = 12
@@ -199,8 +200,8 @@ class BaseStrategy(ABC):
             f"[{self.name}] Placing order: {signal.side.value.upper()} "
             f"{qty} {signal.inst_id} @ MARKET"
         )
-        # 带 stop_loss 的信号视为"开仓"，失败时应回滚本地状态，避免策略以为已开仓
-        is_open_signal = signal.stop_loss is not None
+        # 开仓信号下单失败时要回滚本地状态，避免策略以为已开仓
+        is_open_signal = not signal.reduce_only
         # 平仓腿的已实现盈亏要在下单前取快照（成交后持仓就没了），下单成功后再报给风控
         closing_pnl = None if is_open_signal else self._snapshot_close_pnl(signal)
         order = Signal.to_order(signal, self.name)
@@ -263,28 +264,16 @@ class BaseStrategy(ABC):
         ticker = await self._rest.get_ticker(signal.inst_id)
         price = ticker.last
 
-        if self.inst_type == InstType.SPOT:
-            balance = self._portfolio.get_available("USDT")
-            usdt_amount = balance * pct
-            info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
-            qty = usdt_amount / price
-            # 按 lot_sz 向下取整
-            import math
-            if info.lot_sz > 0:
-                precision = max(0, -int(math.floor(math.log10(info.lot_sz))))
-                factor = 10 ** precision
-                qty = math.floor(qty * factor / (info.lot_sz * factor)) * info.lot_sz
-            return qty if qty >= info.min_sz else 0.0
+        balance = self._portfolio.get_available("USDT")
+        info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
 
-        else:  # SWAP
-            balance = self._portfolio.get_available("USDT")
+        if self.inst_type == InstType.SPOT:
+            qty = balance * pct / price
+        else:  # SWAP：张数 = 名义价值 / (合约面值 × 价格)
             leverage = self.config.get("leverage", 1)
-            info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
-            notional = balance * pct * leverage
-            # 合约张数 = notional / (ct_val * price)
-            import math
-            contracts = math.floor(notional / (info.ct_val * price))
-            return float(contracts) if contracts >= info.min_sz else 0.0
+            qty = balance * pct * leverage / (info.ct_val * price)
+
+        return round_qty(qty, info.lot_sz, info.min_sz)
 
 
 # ── Signal → Order 转换（挂在 Signal 上方便使用）───────────────────────────────
@@ -299,6 +288,7 @@ def _signal_to_order(signal: Signal, strategy_name: str) -> Order:
         pos_side=signal.pos_side,
         strategy_name=strategy_name,
         stop_loss=signal.stop_loss,
+        reduce_only=signal.reduce_only,
     )
 
 

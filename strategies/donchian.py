@@ -15,7 +15,14 @@ from loguru import logger
 
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
-    Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal,
+    Candle,
+    InstType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PosSide,
+    Signal,
 )
 from strategies._base_state import PositionState, build_close_signal
 from strategies._indicators import Donchian, RunningATR

@@ -1,0 +1,168 @@
+"""重启后接管交易所已有持仓
+
+不接管的后果：策略以为自己空仓，下一个信号再开一笔变成双倍仓位，
+而 reconcile 只告警不纠正。
+"""
+from types import SimpleNamespace
+
+import pytest
+
+from engine.strategy_engine import StrategyEngine
+from gateway.models import InstType, Position, PosSide
+from strategies.grid import GridStrategy
+from strategies.mtftrend import MtfTrendStrategy
+from strategies.rightside import RightSideStrategy
+from strategies.trend import TrendStrategy
+from tests.conftest import ETH_SWAP
+
+
+def _pos(side=PosSide.LONG, size=200.0, entry=3000.0):
+    return Position(inst_id=ETH_SWAP, pos_side=side, size=size, entry_price=entry)
+
+
+async def _warmed(make_strategy, candles, cls, **kw):
+    s = make_strategy(cls, **kw)
+    for c in candles(80):
+        await s.on_candle(c)
+    s.reset_position_state()
+    return s
+
+
+async def test_pct_stop_strategy_rebuilds_stop(make_strategy, candles):
+    s = await _warmed(make_strategy, candles, RightSideStrategy)
+    assert s.adopt_position(_pos()) is True
+    assert not s._state.flat
+    assert s._state.pos_side == PosSide.LONG
+    assert s._state.stop_loss == pytest.approx(2700.0)   # entry × (1 - 10%)
+    assert s._half_reduced is False, "无从得知重启前是否减过仓，按未减仓处理"
+
+
+async def test_short_stop_direction(make_strategy, candles):
+    s = await _warmed(make_strategy, candles, RightSideStrategy)
+    assert s.adopt_position(_pos(PosSide.SHORT)) is True
+    assert s._state.stop_loss == pytest.approx(3300.0)   # entry × (1 + 10%)
+
+
+async def test_atr_stop_strategy(make_strategy, candles):
+    s = await _warmed(make_strategy, candles, TrendStrategy,
+                      config={"atr_sl_multiplier": 2.0})
+    atr = s._atr.value
+    assert s.adopt_position(_pos()) is True
+    assert s._state.stop_loss == pytest.approx(3000.0 - 2.0 * atr)
+
+
+async def test_mtf_uses_m15_atr(make_strategy, candles):
+    s = make_strategy(MtfTrendStrategy)
+    for c in candles(80):
+        await s.on_candle(c)
+    s.reset_position_state()
+    assert s.adopt_position(_pos()) is True
+    assert s._state.stop_loss == pytest.approx(3000.0 - s._sl_mult * s._m15.atr.value)
+
+
+def test_refuses_when_stop_cannot_be_rebuilt(make_strategy):
+    """指标未就绪时不能塞个 0 进去：SHORT 的止损判断 close >= 0 会恒真，
+    下一根K线就自己平掉。宁可拒绝启动。"""
+    s = make_strategy(TrendStrategy)          # 未喂K线，ATR 未就绪
+    assert s.adopt_position(_pos(PosSide.SHORT)) is False
+    assert s._state.flat, "拒绝接管时不应污染状态机"
+
+
+async def test_adoption_blocks_double_open(make_strategy, candles):
+    s = await _warmed(make_strategy, candles, RightSideStrategy)
+    s.adopt_position(_pos())
+    assert not s._state.flat, "非 FLAT 则入场分支被短路，不会双开"
+
+
+def test_grid_adopts_as_single_slot(make_strategy):
+    """重启后无从得知原来的分格明细，整笔塞进一个槽是保守做法：
+    下次向上跨格整笔平掉，而不会在已有仓位之上再铺满 n_grids 格。"""
+    s = make_strategy(GridStrategy, config={
+        "grid_lower": 2500, "grid_upper": 3500, "n_grids": 6})
+    assert s.adopt_position(_pos(size=180.0)) is True
+    assert s._long_slots == [180.0]
+
+
+# ── 引擎侧 ────────────────────────────────────────────────────────────────────
+
+class _Engine(SimpleNamespace):
+    _adopt_existing_position = StrategyEngine._adopt_existing_position
+    _warn_if_risk_limits_too_tight = StrategyEngine._warn_if_risk_limits_too_tight
+
+
+class _Strat:
+    def __init__(self, adopts=True, inst_type=InstType.SWAP, config=None):
+        self.name, self.symbol = "s", ETH_SWAP
+        self.inst_type, self.config = inst_type, config or {}
+        self._adopts, self.adopted = adopts, None
+
+    def adopt_position(self, position):
+        self.adopted = position
+        return self._adopts
+
+
+class _Rest:
+    def __init__(self, positions):
+        self._positions = positions
+
+    async def get_positions(self, inst_id=None):
+        return self._positions
+
+
+async def test_engine_adopts_on_start():
+    s, p = _Strat(), _pos()
+    await _Engine(_rest=_Rest([p]))._adopt_existing_position(s)
+    assert s.adopted is p
+
+
+async def test_engine_noop_without_position():
+    s = _Strat()
+    await _Engine(_rest=_Rest([]))._adopt_existing_position(s)
+    assert s.adopted is None
+
+
+async def test_engine_aborts_when_adoption_fails():
+    s = _Strat(adopts=False)
+    with pytest.raises(RuntimeError, match="未能接管"):
+        await _Engine(_rest=_Rest([_pos()]))._adopt_existing_position(s)
+
+
+async def test_abort_mode_does_not_adopt():
+    s = _Strat(config={"on_existing_position": "abort"})
+    with pytest.raises(RuntimeError):
+        await _Engine(_rest=_Rest([_pos()]))._adopt_existing_position(s)
+    assert s.adopted is None
+
+
+async def test_spot_is_skipped():
+    called = []
+    e = _Engine(_rest=SimpleNamespace(
+        get_positions=lambda *a, **k: called.append(1)))
+    await e._adopt_existing_position(_Strat(inst_type=InstType.SPOT))
+    assert not called, "OKX 没有现货持仓接口"
+
+
+def test_warns_when_risk_limits_too_tight(caplog):
+    risk_cfg = SimpleNamespace(max_daily_loss_pct=0.02, max_drawdown_pct=0.05)
+    e = _Engine(_settings=SimpleNamespace(risk=risk_cfg))
+    # 项目当前 eth_rightside_swap 的实际配置：20% × 3x × 10% = 单笔 6%
+    tight = _Strat(config={"sl_pct": 0.10, "position_size_pct": 0.2, "leverage": 3})
+
+    messages = []
+    from loguru import logger
+    sink = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        e._warn_if_risk_limits_too_tight(tight)
+        assert any("风控阈值可能过紧" in m for m in messages)
+
+        messages.clear()
+        loose = _Engine(_settings=SimpleNamespace(
+            risk=SimpleNamespace(max_daily_loss_pct=0.10, max_drawdown_pct=0.20)))
+        loose._warn_if_risk_limits_too_tight(tight)
+        assert not any("风控阈值可能过紧" in m for m in messages)
+
+        messages.clear()
+        e._warn_if_risk_limits_too_tight(_Strat(config={"atr_sl_multiplier": 2.0}))
+        assert not messages, "ATR 止损无法静态估算，不该误报"
+    finally:
+        logger.remove(sink)

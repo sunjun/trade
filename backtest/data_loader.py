@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiohttp
@@ -56,7 +56,7 @@ def _candle_to_row(c: Candle) -> list:
 
 def _row_to_candle(row: list) -> Candle:
     return Candle(
-        ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc),
+        ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=UTC),
         open=float(row[1]),
         high=float(row[2]),
         low=float(row[3]),
@@ -93,7 +93,7 @@ def _save_cache(path: Path, candles: list[Candle]) -> None:
 def _parse_okx_row(row: list) -> Candle:
     confirm = row[8] if len(row) > 8 else "1"
     return Candle(
-        ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc),
+        ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=UTC),
         open=float(row[1]),
         high=float(row[2]),
         low=float(row[3]),
@@ -159,7 +159,7 @@ async def _download_backward(
 
             logger.debug(
                 f"  Page {page}: {len(rows)} rows, "
-                f"oldest={datetime.fromtimestamp(oldest_ts/1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M')}, "
+                f"oldest={datetime.fromtimestamp(oldest_ts/1000, tz=UTC).strftime('%Y-%m-%d %H:%M')}, "
                 f"total_new={len(all_rows)}"
             )
 

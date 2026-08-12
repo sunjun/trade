@@ -28,8 +28,7 @@ sys.path.insert(0, str(ROOT))
 from backtest.data_loader import fetch_all_candles
 from backtest.engine import BacktestEngine
 from backtest.report import _calc_metrics, export_trades_csv, plot_results, print_report
-from gateway.models import InstType, InstrumentInfo
-
+from gateway.models import InstrumentInfo, InstType
 
 # ── 品种静态信息（避免在回测时发 REST 请求获取合约信息）────────────────────────
 # OKX 合约信息（可手动扩展）

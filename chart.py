@@ -35,6 +35,7 @@ from config.settings import settings
 from gateway.models import Candle
 from gateway.okx_rest import OKXRestClient
 from gateway.okx_ws import OKXWebSocketClient
+from strategies._indicators import ema_series
 
 # ── 共享状态 ───────────────────────────────────────────────────────────────────
 _lock = threading.Lock()
@@ -57,23 +58,6 @@ def _ema_color(i: int) -> str:
     return _EMA_PALETTE[i % len(_EMA_PALETTE)]
 
 
-# ── EMA 计算 ───────────────────────────────────────────────────────────────────
-
-def _ema(closes: list[float], period: int) -> list[float | None]:
-    k = 2.0 / (period + 1)
-    result: list[float | None] = [None] * len(closes)
-    val: float | None = None
-    seed: list[float] = []
-    for i, c in enumerate(closes):
-        if val is None:
-            seed.append(c)
-            if len(seed) == period:
-                val = sum(seed) / period
-                result[i] = val
-        else:
-            val = c * k + val * (1 - k)
-            result[i] = val
-    return result
 
 
 # ── 绘制 EMA 折线 ──────────────────────────────────────────────────────────────
@@ -168,7 +152,6 @@ def _draw_selection(ax_c: plt.Axes, ax_v: plt.Axes,
     )
 
     # ── 在 K 线顶部/底部标出价格 ───────────────────────────────────────────────
-    price_color = UP if c.close >= c.open else DN
     ax_c.annotate(
         f'{c.high:.2f}',
         xy=(idx, c.high), xytext=(0, 6),
@@ -200,7 +183,7 @@ def _draw(ax_c: plt.Axes, ax_v: plt.Axes, symbol: str, tf: str,
     closes = [c.close for c in candles]
 
     # 一次性计算所有 EMA（供绘线 + 标注复用）
-    emas = {p: _ema(closes, p) for p in ema_periods}
+    emas = {p: ema_series(closes, p) for p in ema_periods}
     ema_colors = {p: _ema_color(i) for i, p in enumerate(ema_periods)}
 
     # ── 清空 ───────────────────────────────────────────────────────────────────
@@ -293,7 +276,7 @@ def _make_onclick(fig, ax_c, ax_v, symbol, tf, ema_periods):
         if event.xdata is None:
             return
 
-        idx = int(round(event.xdata))
+        idx = round(event.xdata)
         with _lock:
             n = len(_buf)
 

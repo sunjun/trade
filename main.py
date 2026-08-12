@@ -42,9 +42,14 @@ async def main():
 
     loop.set_exception_handler(_task_exception_handler)
 
+    # 持有引用：悬空的 task 可能被 GC 回收，导致停机流程中途消失
+    shutdown_tasks: set[asyncio.Task] = set()
+
     def _shutdown():
         logger.info("Shutdown signal received")
-        asyncio.create_task(engine.stop())
+        task = asyncio.create_task(engine.stop())
+        shutdown_tasks.add(task)
+        task.add_done_callback(shutdown_tasks.discard)
 
     # add_signal_handler 仅 Unix 支持，Windows 降级为 signal.signal
     if sys.platform != 'win32':

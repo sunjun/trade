@@ -1,5 +1,5 @@
 """SQLite 持久化层（使用 aiosqlite 异步操作）"""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiosqlite
 from loguru import logger
@@ -113,7 +113,7 @@ class Database:
         """)
         if dups:
             total = sum(r["n"] - 1 for r in dups)
-            backup = f"orders_backup_{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
+            backup = f"orders_backup_{datetime.now(UTC):%Y%m%d%H%M%S}"
             logger.warning(
                 f"Migration: found {len(dups)} order(s) duplicated into {total} extra "
                 f"row(s) by the old broken upsert; backing up to `{backup}` then deduping"
@@ -147,7 +147,7 @@ class Database:
             logger.warning(f"save_order skipped: empty order_id ({order.inst_id})")
             return
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._db.execute("""
             INSERT INTO orders
               (order_id, client_oid, inst_id, strategy, side, order_type, qty, price,
@@ -215,7 +215,7 @@ class Database:
             signal.order_type.value, signal.qty,
             signal.price, signal.pos_side.value,
             signal.stop_loss, signal.reason,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
         ))
         await self._db.commit()
 

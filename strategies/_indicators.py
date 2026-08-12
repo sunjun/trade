@@ -29,6 +29,17 @@ class RunningEMA:
         self._buf.clear()
 
 
+def ema_series(closes: list[float], period: int) -> list[float | None]:
+    """对整段收盘价算出 EMA 序列，未收敛的位置为 None。
+
+    与 RunningEMA 同源，保证图表画出来的均线和策略实际使用的是同一条——
+    此前 chart.py 和 gui.py 各自复制了一份实现，一旦口径漂移，
+    图上看到的金叉死叉就不是策略真正依据的那个。
+    """
+    ema = RunningEMA(period)
+    return [ema.update(c) for c in closes]
+
+
 class RunningMACD:
     """MACD = EMA(fast) - EMA(slow); Signal = EMA(signal) of MACD; Hist = MACD - Signal"""
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
@@ -60,6 +71,7 @@ class RunningMACD:
 class RunningATR:
     """真实波幅均值（EMA平滑）"""
     def __init__(self, period: int = 14):
+        self.period = period
         self._ema = RunningEMA(period)
         self._prev_close: float | None = None
         self.value: float | None = None
@@ -102,8 +114,8 @@ class RunningRSI:
         if self._avg_gain is None:
             self._buf.append((gain, loss))
             if len(self._buf) >= self.period:
-                self._avg_gain = sum(g for g, _ in self._buf) / self.period
-                self._avg_loss = sum(l for _, l in self._buf) / self.period
+                self._avg_gain = sum(x for x, _ in self._buf) / self.period
+                self._avg_loss = sum(x for _, x in self._buf) / self.period
                 self._set_value()
             return self.value
 

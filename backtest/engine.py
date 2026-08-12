@@ -9,17 +9,23 @@
 """
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from loguru import logger
 
 from engine.risk_manager import RiskManager
 from gateway.models import (
-    Balance, Candle, InstrumentInfo, InstType, Order, OrderSide,
-    OrderStatus, OrderType, PosSide, Position, Signal, Ticker,
+    Balance,
+    Candle,
+    InstrumentInfo,
+    InstType,
+    Order,
+    OrderStatus,
+    Position,
+    PosSide,
+    Ticker,
 )
 
 FEE_RATE = 0.0005  # taker 手续费率 0.05%
@@ -37,12 +43,17 @@ class BacktestPortfolio:
 
         self._cash = initial_capital  # 可用保证金（USDT）
         self._position: dict | None = None  # 当前持仓，None=无仓
+        self._last_price = 0.0        # 最新价，供 get_total_equity 折算浮盈亏
         self.equity_curve: list[float] = [initial_capital]
 
     # ── Portfolio 接口（策略调用）─────────────────────────────────────────────
 
     def get_available(self, currency: str = "USDT") -> float:
         return self._cash if currency == "USDT" else 0.0
+
+    def get_total_equity(self) -> float:
+        """当前权益（含浮盈亏）。策略按权益算仓位预算时会用到。"""
+        return self.current_equity(self._last_price)
 
     def get_position(self, inst_id: str, pos_side: str) -> Position | None:
         if self._position and self._position["pos_side"] == pos_side:
@@ -82,6 +93,7 @@ class BacktestPortfolio:
             )
             self.close_position(price)
 
+        self._last_price = price
         margin = contracts * self.ct_val * price / self.leverage
         fee = contracts * self.ct_val * price * FEE_RATE
         self._cash -= margin + fee
@@ -145,6 +157,7 @@ class BacktestPortfolio:
 
     def current_equity(self, mark_price: float) -> float:
         """返回当前权益（含未实现盈亏）。"""
+        self._last_price = mark_price
         equity = self._cash
         if self._position:
             p = self._position
@@ -177,6 +190,10 @@ class BacktestRest:
         self._current_candle: Candle | None = None
         self.trades: list[TradeRecord] = []
         self._order_seq = 0
+        # 成交后要回调策略的 on_order_update，等价于实盘的 WS 订单推送。
+        # 缺了它，靠成交回报维护状态的策略（网格的槽位、金字塔的档位）
+        # 在回测里状态永远不推进。
+        self.strategy = None
 
     def set_current_candle(self, candle: Candle) -> None:
         self._current_candle = candle
@@ -196,9 +213,9 @@ class BacktestRest:
     async def place_order(self, order: Order, inst_type: InstType) -> Order:
         price = self._price()
         contracts = order.qty
-        ts = self._current_candle.ts if self._current_candle else datetime.now(timezone.utc)
+        ts = self._current_candle.ts if self._current_candle else datetime.now(UTC)
 
-        is_open = order.stop_loss is not None  # 开仓信号带 stop_loss
+        is_open = not order.reduce_only
         filled = contracts
 
         if is_open:
@@ -231,6 +248,9 @@ class BacktestRest:
         order.status = OrderStatus.FILLED
         order.filled_qty = filled
         order.avg_fill_price = price
+
+        if self.strategy is not None and filled > 0:
+            await self.strategy.on_order_update(order)
         return order
 
     async def get_balance(self, currency: str = "USDT") -> Balance:
@@ -298,6 +318,7 @@ class BacktestEngine:
             db=self._db,
         )
         self._strategy._warm_up_done = False
+        self._rest.strategy = self._strategy
 
         self._inst_id = inst_id
         self._inst_info = inst_info
@@ -324,37 +345,38 @@ class BacktestEngine:
         if warm_up_m15 == 0:
             warm_up_m15 = strategy.warm_up_period + 10
 
-        if warm_up_h4 == 0 or warm_up_h1 == 0:
-            if hasattr(strategy, "extra_tf_configs"):
-                for tf, tf_warm, _ in strategy.extra_tf_configs:
-                    if "4H" in tf and warm_up_h4 == 0:
-                        warm_up_h4 = tf_warm + 5
-                    elif "1H" in tf and warm_up_h1 == 0:
-                        warm_up_h1 = tf_warm + 5
+        # 高时框回调按 extra_tf_configs 解析——与实盘引擎（strategy_engine
+        # ._setup_strategy）走同一套约定。此前这里硬编码 `_handle_h4` /
+        # `_handle_h1` 方法名，只有 MtfTrendStrategy 能对上，其他多时框策略
+        # 在回测里根本收不到高时框K线。
+        handlers: dict[str, Callable] = {}   # "4H"/"1H" -> handler
+        for tf, tf_warm, handler in getattr(strategy, "extra_tf_configs", []):
+            if "4H" in tf:
+                handlers["4H"] = handler
+                warm_up_h4 = warm_up_h4 or tf_warm + 5
+            elif "1H" in tf:
+                handlers["1H"] = handler
+                warm_up_h1 = warm_up_h1 or tf_warm + 5
+            else:
+                logger.warning(f"回测暂不支持 {tf} 时框，该时框的数据不会被喂入")
 
         logger.info(
             f"Warm-up: 4H={warm_up_h4}, 1H={warm_up_h1}, 15m={warm_up_m15}"
         )
 
-        # ── 预热 4H ───────────────────────────────────────────────────────────
-        h4_warm = candles_h4[:warm_up_h4]
-        logger.info(f"Warming up {len(h4_warm)} x 4H candles...")
-        for c in h4_warm:
-            c.confirmed = True
-            if hasattr(strategy, "_handle_h4"):
-                await strategy._handle_h4([c])
-        if hasattr(strategy, "on_extra_tf_warmed"):
-            strategy.on_extra_tf_warmed(strategy._tf_h4)
-
-        # ── 预热 1H ───────────────────────────────────────────────────────────
-        h1_warm = candles_h1[:warm_up_h1]
-        logger.info(f"Warming up {len(h1_warm)} x 1H candles...")
-        for c in h1_warm:
-            c.confirmed = True
-            if hasattr(strategy, "_handle_h1"):
-                await strategy._handle_h1([c])
-        if hasattr(strategy, "on_extra_tf_warmed"):
-            strategy.on_extra_tf_warmed(strategy._tf_h1)
+        # ── 预热高时框 ────────────────────────────────────────────────────────
+        for tf, candles, warm_n in (("4H", candles_h4, warm_up_h4),
+                                    ("1H", candles_h1, warm_up_h1)):
+            handler = handlers.get(tf)
+            if handler is None:
+                continue
+            warm = candles[:warm_n]
+            logger.info(f"Warming up {len(warm)} x {tf} candles...")
+            for c in warm:
+                c.confirmed = True
+                await handler([c])
+            if hasattr(strategy, "on_extra_tf_warmed"):
+                strategy.on_extra_tf_warmed(tf)
 
         # ── 预热 15m ──────────────────────────────────────────────────────────
         m15_warm = candles_m15[:warm_up_m15]
@@ -386,15 +408,15 @@ class BacktestEngine:
             # 先喂已闭合的 4H K 线（ts <= 当前 15m 开盘时间）
             while h4_idx < len(h4_bt) and h4_bt[h4_idx].ts <= candle.ts:
                 h4_bt[h4_idx].confirmed = True
-                if hasattr(strategy, "_handle_h4"):
-                    await strategy._handle_h4([h4_bt[h4_idx]])
+                if "4H" in handlers:
+                    await handlers["4H"]([h4_bt[h4_idx]])
                 h4_idx += 1
 
             # 先喂已闭合的 1H K 线
             while h1_idx < len(h1_bt) and h1_bt[h1_idx].ts <= candle.ts:
                 h1_bt[h1_idx].confirmed = True
-                if hasattr(strategy, "_handle_h1"):
-                    await strategy._handle_h1([h1_bt[h1_idx]])
+                if "1H" in handlers:
+                    await handlers["1H"]([h1_bt[h1_idx]])
                 h1_idx += 1
 
             # 止损检查：在喂 K 线前先判断本根是否触及止损

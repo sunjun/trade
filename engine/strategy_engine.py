@@ -1,7 +1,7 @@
 """策略引擎——整合所有组件，管理策略生命周期"""
 import asyncio
 import importlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +126,9 @@ class StrategyEngine:
                 await strategy.on_stop()
             except Exception as e:
                 logger.error(f"Strategy {strategy.name} stop error: {e}")
+        # 关闭数据库：aiosqlite 的工作线程是非守护线程，不关就无法正常退出进程
+        # （这正是 main.py 结尾要用 os._exit 强杀的原因），且未提交的写入会丢
+        await self._db.close()
         logger.info("Engine stopped")
 
     # ── 策略加载 ───────────────────────────────────────────────────────────────
@@ -335,7 +338,7 @@ class StrategyEngine:
     async def _daily_reset_loop(self):
         """每天 UTC 00:01 重置日内风控统计"""
         while self._running:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             # 计算到明天 00:01 的秒数
             tomorrow = now.replace(hour=0, minute=1, second=0, microsecond=0)
             if tomorrow <= now:

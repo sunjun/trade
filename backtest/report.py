@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import csv
 import math
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -13,7 +12,6 @@ import numpy as np
 from loguru import logger
 
 from backtest.engine import TradeRecord
-
 
 # ── 统计指标 ───────────────────────────────────────────────────────────────────
 
@@ -236,8 +234,7 @@ def plot_results(
         eq_arr = np.array(equity_curve[1:])  # 去掉初始值，与 equity_ts 对齐
         initial = equity_curve[0]
 
-        # 着色：盈利=绿，亏损=红
-        color_arr = ["#3fb950" if v >= initial else "#f85149" for v in eq_arr]
+        # 着色：盈利=绿，亏损=红（由下面两条 fill_between 的 where 条件决定）
         ax2.fill_between(equity_ts, initial, eq_arr,
                          where=(eq_arr >= initial), color="#3fb95033", step="post")
         ax2.fill_between(equity_ts, initial, eq_arr,

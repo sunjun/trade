@@ -41,12 +41,21 @@
   cooldown_candles  : 2
 """
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from engine.base_strategy import BaseStrategy
-from gateway.models import Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal
+from gateway.models import (
+    Candle,
+    InstType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PosSide,
+    Signal,
+)
 from strategies._base_state import PositionState, build_close_signal
 from strategies._indicators import RunningATR, RunningEMA, RunningMACD
 
@@ -64,7 +73,7 @@ class _VolMA:
     def __init__(self, period: int = 20):
         self.period = period
         self._buf: list[float] = []
-        self.value: Optional[float] = None
+        self.value: float | None = None
 
     def update(self, vol: float):
         self._buf.append(vol)
@@ -85,12 +94,12 @@ class _TfCtx:
     ema_fast : RunningEMA
     ema_slow : RunningEMA
     vol_ma   : _VolMA
-    macd     : Optional[RunningMACD] = None  # 4H/1H 有，15M 可不用
-    atr      : Optional[RunningATR] = None   # 15M 用于止损
+    macd     : RunningMACD | None = None  # 4H/1H 有，15M 可不用
+    atr      : RunningATR | None = None   # 15M 用于止损
 
     # 上一根K线 EMA 值，用于检测交叉
-    prev_ef  : Optional[float] = None
-    prev_es  : Optional[float] = None
+    prev_ef  : float | None = None
+    prev_es  : float | None = None
 
     def cross_up(self) -> bool:
         """快线上穿慢线"""
@@ -237,7 +246,10 @@ class MtfTrendStrategy(BaseStrategy):
             # 宏观方向：EMA 排列 + 斜率（当前 vs 上根）
             if self._h4.prev_ef is not None:
                 ef_rising = ef > self._h4.prev_ef
-                es_rising = es > self._h4.prev_es if self._h4.prev_es else True
+                # TODO: es_rising 算出来却没参与判断——4H 趋势目前只看快线斜率。
+                # 是漏了 `and es_rising` 还是有意只用快线？改动会影响策略行为，
+                # 需回测验证后再定，暂按现状保留。
+                es_rising = es > self._h4.prev_es if self._h4.prev_es else True  # noqa: F841
                 if ef > es and ef_rising:
                     new_trend = 1
                 elif ef < es and not ef_rising:
@@ -463,7 +475,7 @@ class MtfTrendStrategy(BaseStrategy):
             f"4H={self._h4_trend:+d}  1H={self._h1_bias:+d}"
         )
 
-    def _recompute_stop_loss(self, entry_price: float, pos_side: PosSide) -> Optional[float]:
+    def _recompute_stop_loss(self, entry_price: float, pos_side: PosSide) -> float | None:
         """ATR 止损，但 ATR 挂在 15M 时框上（基类默认找的是 `self._atr`）"""
         atr = self._m15.atr
         if not atr.ready:
@@ -473,7 +485,7 @@ class MtfTrendStrategy(BaseStrategy):
 
     # ── 工具 ──────────────────────────────────────────────────────────────────
 
-    def _close_signal(self, price: float, reason: str) -> Optional[Signal]:
+    def _close_signal(self, price: float, reason: str) -> Signal | None:
         return build_close_signal(
             self._state, self.symbol, self._portfolio,
             self._can_short, reason, self.name,

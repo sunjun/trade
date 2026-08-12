@@ -4,9 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
-import math
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -14,10 +12,19 @@ import aiohttp
 from loguru import logger
 
 from gateway.models import (
-    Balance, Candle, InstType, InstrumentInfo, Order, OrderSide, OrderStatus,
-    OrderType, PosSide, Position, Ticker,
+    Balance,
+    Candle,
+    InstrumentInfo,
+    InstType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    PosSide,
+    Ticker,
 )
-
+from gateway.precision import round_to_step
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -45,6 +52,7 @@ class OKXError(RuntimeError):
         self.code = code
         self.status = status
 
+
 TIMEFRAME_MAP = {
     "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
     "1H": "1H", "2H": "2H", "4H": "4H", "6H": "6H", "12H": "12H",
@@ -62,7 +70,7 @@ def _sign(secret_key: str, timestamp: str, method: str, path: str, body: str = "
 
 
 def _timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -154,7 +162,7 @@ class OKXRestClient:
                             self._check(data, path)
                         return data
 
-            except asyncio.TimeoutError as e:
+            except TimeoutError as e:
                 last_error = OKXError(f"Timeout on {path}")
                 last_error.__cause__ = e
             except aiohttp.ClientError as e:
@@ -196,7 +204,7 @@ class OKXRestClient:
             last=float(d["last"]),
             bid=float(d["bidPx"]) if d["bidPx"] else float(d["last"]),
             ask=float(d["askPx"]) if d["askPx"] else float(d["last"]),
-            ts=datetime.fromtimestamp(int(d["ts"]) / 1000, tz=timezone.utc),
+            ts=datetime.fromtimestamp(int(d["ts"]) / 1000, tz=UTC),
         )
 
     async def get_candles(
@@ -211,10 +219,10 @@ class OKXRestClient:
         )
         candles = []
         for row in reversed(data["data"]):  # API返回降序，反转为升序
-            ts, o, h, l, c, vol, _, _, confirm = row
+            ts, o, high, low, c, vol, _, _, confirm = row
             candles.append(Candle(
-                ts=datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc),
-                open=float(o), high=float(h), low=float(l),
+                ts=datetime.fromtimestamp(int(ts) / 1000, tz=UTC),
+                open=float(o), high=float(high), low=float(low),
                 close=float(c), volume=float(vol),
                 confirmed=(confirm == "1"),
             ))
@@ -367,7 +375,7 @@ class OKXRestClient:
             filled_qty=float(d["fillSz"]),
             avg_fill_price=float(d["avgPx"]) if d.get("avgPx") else 0.0,
             fee=float(d["fee"]) if d.get("fee") else 0.0,
-            ts=datetime.fromtimestamp(int(d["cTime"]) / 1000, tz=timezone.utc),
+            ts=datetime.fromtimestamp(int(d["cTime"]) / 1000, tz=UTC),
         )
 
     @staticmethod
@@ -380,10 +388,9 @@ class OKXRestClient:
         }.get(state, OrderStatus.PENDING)
 
     def _round_qty(self, qty: float, inst_id: str) -> float:
+        """发请求前按 lotSz 兜底取整。策略侧 _calc_qty 已经取过一次，
+        这里是防止直接构造 Order 调用 place_order 的路径漏掉精度处理。"""
         info = self._inst_cache.get(inst_id)
-        if not info or info.lot_sz <= 0:
+        if not info:
             return qty
-        # 按 lot_sz 向下取整
-        precision = max(0, -int(math.floor(math.log10(info.lot_sz))))
-        factor = 10 ** precision
-        return math.floor(qty * factor / (info.lot_sz * factor)) * info.lot_sz
+        return round_to_step(qty, info.lot_sz)

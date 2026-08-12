@@ -14,13 +14,13 @@ import hmac
 import json
 import time
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import websockets
 from loguru import logger
 
-from gateway.models import Candle, Order, OrderSide, OrderStatus, OrderType, PosSide, Position
+from gateway.models import Candle, Order, OrderSide, OrderStatus, OrderType, Position, PosSide
 
 # ── WebSocket 端点 ─────────────────────────────────────────────────────────────
 WS_PUBLIC   = "wss://ws.okx.com:8443/ws/v5/public"
@@ -215,7 +215,7 @@ class OKXWebSocketClient:
             elif evt == "subscribe":
                 logger.info(f"WS subscribe confirmed: {msg.get('arg')}")
             elif evt == "login":
-                logger.info(f"WS login confirmed")
+                logger.info("WS login confirmed")
             else:
                 logger.debug(f"WS event: {msg}")
             return
@@ -279,7 +279,7 @@ class OKXWebSocketClient:
                 # OKX candle row: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
                 confirm = row[8] if len(row) > 8 else "0"
                 results.append(Candle(
-                    ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc),
+                    ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=UTC),
                     open=float(row[1]), high=float(row[2]),
                     low=float(row[3]), close=float(row[4]),
                     volume=float(row[5]),

@@ -306,3 +306,25 @@ strategies:
       td_mode: cross
       position_size_pct: 0.1
       cooldown_candles: 3
+
+  # ── 金字塔加仓：斐波那契支撑 + ATR 间隔双确认（越跌越买，只做多）─────────
+  # ⚠️ 马丁格尔型策略，风险特征与上面的趋势策略完全不同：胜率高、单次亏损大。
+  #    默认关闭，启用前请先读 README 的「策略优缺点分析」一节并跑回测。
+  - name: btc_pyramid_swap
+    class: PyramidStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: BTC-USDT-SWAP
+    config:
+      timeframe: "15m"          # 主时框：负责止损/止盈/加仓触发检查
+      higher_timeframe: "4H"    # 高时框：负责算支撑位与 ATR
+      max_steps: 6              # 最多 6 档
+      pyramid_ratio: 1.3        # 每档保证金 ×1.3 递增
+      capital_pct: 0.5          # 只动用账户权益的 50%（参考实现用满 100%）
+      leverage: 5
+      td_mode: cross
+      stop_loss_pct: 0.15       # 浮亏达「动用资金」15% 全平
+      tp_schedule: [0.015, 0.020, 0.025, 0.030, 0.038, 0.050]
+      atr_period: 14
+      atr_multiplier: 1.2       # 加仓最小间隔 = 1.2 × ATR(4H)
+      fib_lookback: 100

@@ -1,7 +1,6 @@
 """CLI 工具——查看状态、管理策略、查询历史"""
 import asyncio
 import sys
-from datetime import date
 
 import click
 
@@ -133,7 +132,7 @@ def signals(strategy, limit):
             click.echo(
                 f"{r['id']:>5}  {r['created_at'][:19]}  {r['strategy']:20}  "
                 f"{r['inst_id']:16}  {r['side']:5}  {r['order_type']:8}  "
-                f"{str(r['stop_loss'] or '-'):>12}  {r['reason'] or ''}"
+                f"{r['stop_loss'] or '-'!s:>12}  {r['reason'] or ''}"
             )
         await db.close()
     asyncio.run(_run())

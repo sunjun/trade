@@ -1,0 +1,55 @@
+[project]
+name = "okx-trade"
+version = "0.1.0"
+description = "OKX 现货 / 永续合约的 asyncio 策略交易框架"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# asyncio_mode=auto：async def test_* 无需逐个加 @pytest.mark.asyncio
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning:engine.*", "error::DeprecationWarning:gateway.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# gemini.py 是外部参考用的伪代码草稿（大量未定义函数），不参与检查
+exclude = ["logs", "backtest_cache", "backtest_results", "gemini.py"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes：未使用的导入/变量、未定义名字
+    "I",         # isort：导入顺序
+    "B",         # bugbear：可疑写法
+    "UP",        # pyupgrade
+    "RUF",       # ruff 专有规则
+    "PLC2401",   # 非 ASCII 标识符——曾经有个西里尔字母 а 混进变量名 vmа
+]
+ignore = [
+    "E501",      # 行长交给 line-length，注释里的对齐表格不强制
+    "B008",      # FastAPI 风格的默认值调用，本项目无此模式
+    "B027",      # BaseStrategy 的 on_start/on_stop/on_order_update 是可选钩子，
+                 # 空实现即"默认什么都不做"，不该强制子类实现
+    # 本项目注释与文档字符串用中文，全角标点是正常写法而非"易混淆字符"。
+    # 真正要防的是标识符里混入外形相同的字母，那由上面的 PLC2401 负责。
+    "RUF001", "RUF002", "RUF003",
+    # str+Enum 改 StrEnum 会改变 str() 的结果，而全项目都靠 .value 与交易所字段
+    # 对接，不值得为风格冒这个险
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest 需要先把项目根加入 sys.path 再导入项目模块
+"tests/conftest.py" = ["E402"]
+# 回测脚本需要先把项目根加入 sys.path 才能导入项目模块
+"backtest/run_backtest.py" = ["E402"]
+"backtest/run_all.py" = ["E402"]
+# GUI 必须在 import pyplot 之前设置 matplotlib backend，导入顺序不能动；
+# zip 的 strict 参数在这些等长序列上无意义
+"gui.py" = ["E402", "B905"]
+"chart.py" = ["E402", "B905"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backtest", "config", "engine", "gateway", "storage", "strategies"]

@@ -18,7 +18,14 @@ from loguru import logger
 
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
-    Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal,
+    Candle,
+    InstType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PosSide,
+    Signal,
 )
 
 if TYPE_CHECKING:
@@ -120,7 +127,7 @@ class GridStrategy(BaseStrategy):
                             sig = Signal(
                                 inst_id=self.symbol, side=OrderSide.BUY,
                                 order_type=OrderType.MARKET, qty=unit_qty,
-                                pos_side=PosSide.SHORT,
+                                pos_side=PosSide.SHORT, reduce_only=True,
                                 reason=f"Grid close short zone={zone}",
                             )
                             signals.append(sig)
@@ -137,7 +144,7 @@ class GridStrategy(BaseStrategy):
                             sig = Signal(
                                 inst_id=self.symbol, side=OrderSide.SELL,
                                 order_type=OrderType.MARKET, qty=unit_qty,
-                                pos_side=pos_side,
+                                pos_side=pos_side, reduce_only=True,
                                 reason=f"Grid close long zone={zone}",
                             )
                             signals.append(sig)
@@ -188,6 +195,7 @@ class GridStrategy(BaseStrategy):
             inst_id=self.symbol, side=OrderSide.SELL,
             order_type=OrderType.MARKET, qty=qty,
             pos_side=PosSide.LONG if self._can_short else PosSide.NET,
+            reduce_only=True,
             reason="Grid boundary stop: close all longs",
         )
 
@@ -199,7 +207,7 @@ class GridStrategy(BaseStrategy):
         return Signal(
             inst_id=self.symbol, side=OrderSide.BUY,
             order_type=OrderType.MARKET, qty=qty,
-            pos_side=PosSide.SHORT,
+            pos_side=PosSide.SHORT, reduce_only=True,
             reason="Grid boundary stop: close all shorts",
         )
 

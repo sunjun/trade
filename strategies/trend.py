@@ -14,7 +14,14 @@ from loguru import logger
 
 from engine.base_strategy import BaseStrategy
 from gateway.models import (
-    Candle, InstType, Order, OrderSide, OrderStatus, OrderType, PosSide, Signal,
+    Candle,
+    InstType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PosSide,
+    Signal,
 )
 from strategies._base_state import PositionState, build_close_signal
 from strategies._indicators import RunningATR, RunningEMA, RunningMACD
@@ -169,9 +176,12 @@ class TrendStrategy(BaseStrategy):
             macd_ok = (golden_cross and macd_bull) or (death_cross and macd_bear)
             spread_ok = spread_ok_bull if golden_cross else spread_ok_bear
             reasons = []
-            if not macd_ok:    reasons.append("MACD mismatch")
-            if not spread_ok:  reasons.append(f"spread shrinking ({ema_spread:+.4f} vs prev {prev_spread:+.4f})")
-            if not cooldown_ok: reasons.append(f"cooldown {self._candles_since_trade}/{self._cooldown_candles}K")
+            if not macd_ok:
+                reasons.append("MACD mismatch")
+            if not spread_ok:
+                reasons.append(f"spread shrinking ({ema_spread:+.4f} vs prev {prev_spread:+.4f})")
+            if not cooldown_ok:
+                reasons.append(f"cooldown {self._candles_since_trade}/{self._cooldown_candles}K")
             confirm = "YES" if not reasons else f"NO ({', '.join(reasons)})"
             logger.info(
                 f"[{self.name}] {cross_type} | "

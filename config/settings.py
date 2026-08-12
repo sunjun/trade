@@ -1,4 +1,5 @@
-from pydantic import Field
+from functools import cached_property
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,13 +27,18 @@ class Settings(BaseSettings):
     db_path: str = "trade.db"
     strategy_config: str = "config/strategies.yaml"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # cached_property 需要 __dict__，pydantic 默认不允许给实例设未声明的属性
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", ignored_types=(cached_property,)
+    )
 
-    @property
+    # 用 cached_property 而非 property：后者每次访问都会重建配置对象并重读 .env 文件，
+    # 而 settings.okx / settings.risk 在下单、风控等热路径上被反复访问。
+    @cached_property
     def okx(self) -> OKXConfig:
         return OKXConfig()
 
-    @property
+    @cached_property
     def risk(self) -> RiskConfig:
         return RiskConfig()
 
