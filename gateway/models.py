@@ -96,6 +96,7 @@ class Position:
     mark_price: float = 0.0
     unrealized_pnl: float = 0.0
     leverage: int = 1
+    mgn_mode: str = ""   # cross / isolated；空串=未知（旧数据或推送里没带）
 
 
 @dataclass

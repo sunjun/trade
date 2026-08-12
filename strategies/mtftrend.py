@@ -489,5 +489,6 @@ class MtfTrendStrategy(BaseStrategy):
     def _close_signal(self, price: float, reason: str) -> Signal | None:
         return build_close_signal(
             self._state, self.symbol, self._portfolio,
-            self._can_short, reason, self.name,
+            self.inst_type == InstType.SWAP, reason, self.name,
+            mgn_mode=self.td_mode,
         )

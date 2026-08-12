@@ -397,7 +397,9 @@ class RightSideStrategy(BaseStrategy):
         """减仓：平掉 reduce_ratio 比例的持仓"""
         if self._state.flat:
             return None
-        pos = self._portfolio.get_position(self.symbol, self._state.pos_side.value)
+        pos = self._portfolio.get_position(
+            self.symbol, self._state.pos_side.value, self.td_mode
+        )
         if not pos or pos.size <= 0:
             logger.warning(f"[{self.name}] Reduce signal but no position found, skip")
             return None
@@ -423,7 +425,8 @@ class RightSideStrategy(BaseStrategy):
     def _close_signal(self, price: float, reason: str) -> Signal | None:
         return build_close_signal(
             self._state, self.symbol, self._portfolio,
-            self._can_short, reason, self.name,
+            self.inst_type == InstType.SWAP, reason, self.name,
+            mgn_mode=self.td_mode,
         )
 
     # ── 工具方法 ───────────────────────────────────────────────────────────────

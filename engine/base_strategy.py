@@ -71,6 +71,10 @@ class BaseStrategy(ABC):
         self._running = False
         self._warm_up_done = False   # 历史数据预热完成标志
 
+        # 本策略下单用的保证金模式。OKX 上同品种同方向的全仓/逐仓是两笔独立持仓，
+        # 查自己的仓位时必须带上它，否则会读到手动仓或别的策略的仓位。
+        self.td_mode = config.get("td_mode", "cross") if inst_type == InstType.SWAP else ""
+
         self.client_tag = make_client_tag(name)  # clOrdId 前缀，用于回推订单归属
         self._order_seq = 0
         # 未收盘K线心跳的节流：策略只在收线那一刻才判断要不要交易，
@@ -338,7 +342,9 @@ class BaseStrategy(ABC):
         if unit_value <= 0:
             return qty
 
-        pos = self._portfolio.get_position(signal.inst_id, signal.pos_side.value)
+        pos = self._portfolio.get_position(
+            signal.inst_id, signal.pos_side.value, self.td_mode
+        )
         existing = (pos.size if pos else 0.0) * unit_value
 
         allowed = self._risk.cap_notional(
@@ -355,7 +361,9 @@ class BaseStrategy(ABC):
         与最终成交价会有滑点/手续费级别的偏差，作为熔断触发器足够。
         现货没有 positions 概念（Portfolio 不跟踪），返回 None 表示无法统计。
         """
-        pos = self._portfolio.get_position(signal.inst_id, signal.pos_side.value)
+        pos = self._portfolio.get_position(
+            signal.inst_id, signal.pos_side.value, self.td_mode
+        )
         if pos is None or pos.size <= 0:
             return None
         ratio = min(signal.qty / pos.size, 1.0) if signal.qty > 0 else 1.0

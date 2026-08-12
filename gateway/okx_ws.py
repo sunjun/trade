@@ -319,6 +319,7 @@ class OKXWebSocketClient:
                     mark_price=float(d["markPx"]) if d.get("markPx") else 0.0,
                     unrealized_pnl=float(d["upl"]) if d.get("upl") else 0.0,
                     leverage=int(float(d["lever"])) if d.get("lever") else 1,
+                    mgn_mode=d.get("mgnMode", ""),
                 ))
             return results
 

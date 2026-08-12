@@ -492,7 +492,10 @@ class PyramidStrategy(BaseStrategy):
     def _close_signal(self, reason: str) -> Signal | None:
         return build_close_signal(
             self._state, self.symbol, self._portfolio,
-            can_short=False, reason=reason, strategy_name=self.name,
+            is_swap=self.inst_type == InstType.SWAP,
+            reason=reason, strategy_name=self.name,
+            max_qty=self._total_qty,   # 绝不碰手动仓/其他策略的仓位
+            mgn_mode=self.td_mode,
         )
 
     # ── 成交回调：维护金字塔状态 ───────────────────────────────────────────────
@@ -547,6 +550,9 @@ class PyramidStrategy(BaseStrategy):
         self._reset_cycle()
 
     def _recompute_stop_loss(self, entry_price: float, pos_side) -> float | None:
+        # 本策略只做多，失效价是「跌破最低支撑」——对空头没有任何意义
+        if pos_side == PosSide.SHORT:
+            return None
         if not (self._supports and self._atr.ready):
             return None
         return self._invalidation_price()
@@ -557,6 +563,14 @@ class PyramidStrategy(BaseStrategy):
         宁可少赚（不再加仓、等止盈或止损）也不要在未知档位上继续加仓——
         真实档位若比猜测的低，继续加仓会超出原定的风险预算。
         """
+        if position.pos_side == PosSide.SHORT:
+            logger.critical(
+                f"[{self.name}] 交易所上是 {position.pos_side.value} 持仓，"
+                f"而本策略只做多，拒绝接管——若按多头接管，之后每一次止盈/止损都会"
+                f"发出 posSide=long 的平仓单并被交易所拒绝 (sCode 51169)，仓位裸奔"
+            )
+            return False
+
         stop = self._recompute_stop_loss(position.entry_price, position.pos_side)
         if stop is None:
             logger.critical(f"[{self.name}] 支撑位/ATR 未就绪，无法重建止损，拒绝接管")
@@ -571,7 +585,7 @@ class PyramidStrategy(BaseStrategy):
         self._bars_at_max = 0
         self._state.open(position.pos_side, position.entry_price, stop)
         logger.warning(
-            f"[{self.name}] 接管已有持仓 size={position.size} "
+            f"[{self.name}] 接管已有持仓 {position.pos_side.value} size={position.size} "
             f"entry={position.entry_price:.4f} 止损重建为 {stop:.4f}；"
             f"档位未知，按已加满 ({self._max_steps}/{self._max_steps}) 处理，不再加仓"
         )

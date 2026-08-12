@@ -372,6 +372,53 @@ def test_adopt_refused_before_warmup(pyramid):
     assert pyramid._state.flat
 
 
+async def test_adopt_refuses_short_position(pyramid):
+    """只做多的策略接管空头 = 之后每一单平仓都发 posSide=long 被拒 (sCode 51169)"""
+    await _warm_higher(pyramid, rising=True)
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.SHORT, size=300.0,
+                   entry_price=3500.0)
+    assert pyramid.adopt_position(pos) is False
+    assert pyramid._state.flat
+    assert pyramid._step == 0
+
+
+async def test_close_signal_uses_long_pos_side_on_swap(pyramid):
+    """双向持仓模式下平多必须发 posSide=long；发 net 会被交易所拒单"""
+    pos = Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=100.0,
+                   entry_price=3500.0)
+    pyramid._portfolio = FakePortfolio(position=pos)
+    await _warm_higher(pyramid, rising=True)
+    entry = pyramid._supports[0] - 1
+    await pyramid.on_candle(_m15(entry))
+    await _fill(pyramid, entry, 100)
+
+    signals = await pyramid.on_candle(_m15(pyramid._stop_price - 1))
+    assert len(signals) == 1
+    assert signals[0].pos_side is PosSide.LONG
+
+
+async def test_partial_tp_and_full_close_agree_on_pos_side(pyramid):
+    """分档减仓与全平走的是两条代码路径，方向参数必须一致"""
+    assert pyramid._reduce_signal(1.0, "x").pos_side is PosSide.LONG
+
+
+async def test_full_close_never_touches_manual_position(pyramid):
+    """交易所把手动仓和策略仓合并成一笔，全平只该平掉策略自己开的那部分"""
+    await _warm_higher(pyramid, rising=True)
+    entry = pyramid._supports[0] - 1
+    # 交易所侧 900 张 = 策略的 100 张 + 手动开的 800 张
+    pyramid._portfolio = FakePortfolio(
+        position=Position(inst_id=ETH_SWAP, pos_side=PosSide.LONG, size=900.0,
+                          entry_price=3500.0))
+    await pyramid.on_candle(_m15(entry))
+    await _fill(pyramid, entry, 100)
+    assert pyramid._total_qty == 100.0
+
+    signals = await pyramid.on_candle(_m15(pyramid._stop_price - 1))
+    assert len(signals) == 1
+    assert signals[0].qty == 100.0, "平仓量不能超过策略自己持有的张数"
+
+
 def test_rejects_short_tp_schedule(make_strategy):
     with pytest.raises(ValueError, match="tp_schedule"):
         make_strategy(PyramidStrategy, config={"max_steps": 6, "tp_schedule": [0.01]})

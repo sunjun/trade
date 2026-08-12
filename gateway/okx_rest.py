@@ -260,6 +260,7 @@ class OKXRestClient:
                 mark_price=float(d["markPx"]) if d["markPx"] else 0.0,
                 unrealized_pnl=float(d["upl"]) if d["upl"] else 0.0,
                 leverage=int(float(d["lever"])) if d["lever"] else 1,
+                mgn_mode=d.get("mgnMode", ""),
             ))
         return positions
 

@@ -73,7 +73,7 @@ class FakePortfolio:
     def get_total_equity(self):
         return self._equity
 
-    def get_position(self, inst_id, pos_side="long"):
+    def get_position(self, inst_id, pos_side="long", mgn_mode=None):
         if self._position is not None and self._position.pos_side.value == pos_side:
             return self._position
         return None

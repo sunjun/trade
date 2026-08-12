@@ -55,7 +55,10 @@ class BacktestPortfolio:
         """当前权益（含浮盈亏）。策略按权益算仓位预算时会用到。"""
         return self.current_equity(self._last_price)
 
-    def get_position(self, inst_id: str, pos_side: str) -> Position | None:
+    def get_position(
+        self, inst_id: str, pos_side: str, mgn_mode: str | None = None
+    ) -> Position | None:
+        # 回测只有一个账户、一种保证金模式，mgn_mode 收下但不参与匹配
         if self._position and self._position["pos_side"] == pos_side:
             p = self._position
             return Position(

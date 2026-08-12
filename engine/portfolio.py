@@ -13,10 +13,19 @@ if TYPE_CHECKING:
     from gateway.okx_rest import OKXRestClient
 
 
+def _pos_key(inst_id: str, pos_side: str, mgn_mode: str) -> str:
+    return f"{inst_id}:{pos_side}:{mgn_mode}"
+
+
+def _pos_key_of(p: Position) -> str:
+    return _pos_key(p.inst_id, p.pos_side.value, p.mgn_mode)
+
+
 class Portfolio:
     def __init__(self):
         self._balances: dict[str, Balance] = {}    # currency -> Balance
-        self._positions: dict[str, Position] = {}  # inst_id:pos_side -> Position
+        # inst_id:pos_side:mgn_mode -> Position（全仓/逐仓是两笔独立持仓，不能共用键）
+        self._positions: dict[str, Position] = {}
         self._total_equity: float = 0.0
         self._lock = asyncio.Lock()
         # 已结算过余额的订单（有界，防重复扣款）。deque 自动淘汰最老的，
@@ -35,9 +44,7 @@ class Portfolio:
 
                 # 刷新持仓（合约）
                 positions = await rest.get_positions()
-                self._positions = {
-                    f"{p.inst_id}:{p.pos_side.value}": p for p in positions
-                }
+                self._positions = {_pos_key_of(p): p for p in positions}
                 logger.debug(f"Portfolio refreshed: equity={self._total_equity:.2f} USDT, "
                              f"positions={len(self._positions)}")
             except Exception as e:
@@ -48,7 +55,7 @@ class Portfolio:
     async def on_position_update(self, positions: list[Position]):
         async with self._lock:
             for p in positions:
-                key = f"{p.inst_id}:{p.pos_side.value}"
+                key = _pos_key_of(p)
                 if p.size == 0:
                     self._positions.pop(key, None)
                 else:
@@ -92,8 +99,22 @@ class Portfolio:
     def get_total_equity(self) -> float:
         return self._total_equity
 
-    def get_position(self, inst_id: str, pos_side: str = "long") -> Position | None:
-        return self._positions.get(f"{inst_id}:{pos_side}")
+    def get_position(
+        self, inst_id: str, pos_side: str = "long", mgn_mode: str | None = None
+    ) -> Position | None:
+        """取持仓。
+
+        OKX 用 instId + posSide + mgnMode 三元组标识持仓——同一品种同一方向的
+        全仓和逐仓是两笔互不相干的仓位（手动开的逐仓单不会和策略的全仓单合并）。
+        所以策略必须带上自己的 mgn_mode 来取，否则会读到别人的仓位。
+        mgn_mode=None 表示不区分，返回该方向上任意一笔（现货/测试用）。
+        """
+        if mgn_mode is not None:
+            return self._positions.get(_pos_key(inst_id, pos_side, mgn_mode))
+        prefix = f"{inst_id}:{pos_side}:"
+        return next(
+            (p for k, p in self._positions.items() if k.startswith(prefix)), None
+        )
 
     def has_position(self, inst_id: str) -> bool:
         return any(inst_id in k for k in self._positions)

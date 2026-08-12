@@ -255,18 +255,57 @@ class StrategyEngine:
 
         策略配置 `on_existing_position` 可选：
           adopt（默认）— 接管，由策略按自己的出场逻辑管理
+          ignore       — 不接管（手动持仓，人工自己管），策略以空仓启动
           abort        — 拒绝启动该策略，交由人工处理
         接管失败（如止损价无法重建）一律降级为 abort。
         """
         if strategy.inst_type != InstType.SWAP:
             return  # 现货没有 positions 频道/接口，无从查起
 
-        positions = await self._rest.get_positions(strategy.symbol)
-        position = next((p for p in positions if p.size > 0), None)
-        if position is None:
+        positions = [p for p in await self._rest.get_positions(strategy.symbol) if p.size > 0]
+        if not positions:
             return
 
         mode = strategy.config.get("on_existing_position", "adopt")
+        logger.warning(
+            f"[{strategy.name}] 交易所已有 {strategy.symbol} 持仓（on_existing_position={mode}）："
+            + "，".join(
+                f"{p.pos_side.value} {p.size} 张 @ {p.entry_price} "
+                f"({p.mgn_mode or 'mgnMode未知'})" for p in positions
+            )
+        )
+
+        if mode == "ignore":
+            logger.warning(
+                f"[{strategy.name}] 按配置不接管上述持仓，策略以空仓启动。"
+                f"注意：同方向同保证金模式的仓位在交易所会合并，"
+                f"策略只会平掉自己开出来的部分"
+            )
+            return
+
+        # 保证金模式不同的仓位在 OKX 上是彼此独立的两笔（策略开的全仓单不会和
+        # 手动开的逐仓单合并），策略既管不到也不会撞上，跳过即可。
+        # 硬接管过来的后果是每次平仓都被判为「该方向无持仓」(sCode 51169)。
+        def _is_mine(p):
+            return not p.mgn_mode or p.mgn_mode == strategy.td_mode
+
+        mine = [p for p in positions if _is_mine(p)]
+        if others := [p for p in positions if not _is_mine(p)]:
+            logger.warning(
+                f"[{strategy.name}] 其中 {len(others)} 笔的保证金模式不是 "
+                f"{strategy.td_mode}，与本策略互不相干，不接管"
+            )
+        if not mine:
+            return
+
+        # 双向持仓模式下同一品种可能多空各一笔，任选一笔接管都会漏管另一笔
+        if len(mine) > 1:
+            raise RuntimeError(
+                f"{strategy.symbol} 在 {strategy.td_mode} 模式下同时存在 {len(mine)} 笔持仓，"
+                f"策略状态机只能接管一个方向，拒绝启动，请人工先平掉多余方向。"
+            )
+        position = mine[0]
+
         if mode == "adopt" and strategy.adopt_position(position):
             return
 
@@ -408,10 +447,12 @@ class StrategyEngine:
             # 刷新后让每个策略用真实持仓修正本地状态（爆仓/外部平仓/交易所SL触发等）
             for strategy in self._strategies:
                 try:
-                    # 合约走 pos_side 分仓；现货统一 NET
-                    pos_long  = self._portfolio.get_position(strategy.symbol, "long")
-                    pos_short = self._portfolio.get_position(strategy.symbol, "short")
-                    pos_net   = self._portfolio.get_position(strategy.symbol, "net")
+                    # 合约走 pos_side 分仓；现货统一 NET。
+                    # 带上策略自己的保证金模式，免得读到手动开的逐仓单
+                    mgn = strategy.td_mode
+                    pos_long  = self._portfolio.get_position(strategy.symbol, "long", mgn)
+                    pos_short = self._portfolio.get_position(strategy.symbol, "short", mgn)
+                    pos_net   = self._portfolio.get_position(strategy.symbol, "net", mgn)
                     position = pos_long or pos_short or pos_net
                     strategy.reconcile_position(position)
                 except Exception as e:

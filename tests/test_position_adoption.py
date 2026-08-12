@@ -91,9 +91,11 @@ class _Engine(SimpleNamespace):
 
 
 class _Strat:
-    def __init__(self, adopts=True, inst_type=InstType.SWAP, config=None):
+    def __init__(self, adopts=True, inst_type=InstType.SWAP, config=None,
+                 td_mode="cross"):
         self.name, self.symbol = "s", ETH_SWAP
         self.inst_type, self.config = inst_type, config or {}
+        self.td_mode = td_mode
         self._adopts, self.adopted = adopts, None
 
     def adopt_position(self, position):
@@ -132,6 +134,56 @@ async def test_abort_mode_does_not_adopt():
     with pytest.raises(RuntimeError):
         await _Engine(_rest=_Rest([_pos()]))._adopt_existing_position(s)
     assert s.adopted is None
+
+
+async def test_ignore_mode_leaves_manual_position_alone():
+    """手动开的仓位由人工管理，策略以空仓启动，不接管也不因此拒启动"""
+    s = _Strat(config={"on_existing_position": "ignore"})
+    await _Engine(_rest=_Rest([_pos()]))._adopt_existing_position(s)
+    assert s.adopted is None
+
+
+async def test_ignore_mode_tolerates_both_directions():
+    """不接管就无所谓「状态机只能管一个方向」，多空并存也不该拦启动"""
+    s = _Strat(config={"on_existing_position": "ignore"})
+    positions = [_pos(), _pos(PosSide.SHORT)]
+    await _Engine(_rest=_Rest(positions))._adopt_existing_position(s)
+    assert s.adopted is None
+
+
+async def test_engine_aborts_on_both_directions():
+    s = _Strat()
+    with pytest.raises(RuntimeError, match="只能接管一个方向"):
+        await _Engine(
+            _rest=_Rest([_pos(), _pos(PosSide.SHORT)])
+        )._adopt_existing_position(s)
+    assert s.adopted is None
+
+
+async def test_isolated_position_not_adopted_by_cross_strategy():
+    """逐仓持仓与全仓策略互不相干；硬接管的话每次平仓都会撞 sCode 51169"""
+    p = _pos()
+    p.mgn_mode = "isolated"
+    s = _Strat(td_mode="cross")
+    await _Engine(_rest=_Rest([p]))._adopt_existing_position(s)
+    assert s.adopted is None
+
+
+async def test_matching_margin_mode_still_adopts():
+    p = _pos()
+    p.mgn_mode = "cross"
+    s = _Strat(td_mode="cross")
+    await _Engine(_rest=_Rest([p]))._adopt_existing_position(s)
+    assert s.adopted is p
+
+
+async def test_only_same_margin_mode_counts_as_conflict():
+    """一笔逐仓 + 一笔全仓不算「多空并存」，全仓那笔照常接管"""
+    iso, cross = _pos(PosSide.SHORT), _pos()
+    iso.mgn_mode, cross.mgn_mode = "isolated", "cross"
+    s = _Strat(td_mode="cross")
+    await _Engine(_rest=_Rest([iso, cross]))._adopt_existing_position(s)
+    assert s.adopted is cross
 
 
 async def test_spot_is_skipped():

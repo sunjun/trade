@@ -187,8 +187,11 @@ class GridStrategy(BaseStrategy):
         )
 
     def _close_all_longs(self, price: float) -> Signal | None:
-        pos = self._portfolio.get_position(self.symbol,
-                                           PosSide.LONG.value if self._can_short else PosSide.NET.value)
+        pos = self._portfolio.get_position(
+            self.symbol,
+            PosSide.LONG.value if self._can_short else PosSide.NET.value,
+            self.td_mode,
+        )
         qty = pos.size if pos else 0.0
         if qty <= 0:
             return None
@@ -201,7 +204,7 @@ class GridStrategy(BaseStrategy):
         )
 
     def _close_all_shorts(self, price: float) -> Signal | None:
-        pos = self._portfolio.get_position(self.symbol, PosSide.SHORT.value)
+        pos = self._portfolio.get_position(self.symbol, PosSide.SHORT.value, self.td_mode)
         qty = pos.size if pos else 0.0
         if qty <= 0:
             return None
