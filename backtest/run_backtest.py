@@ -38,12 +38,12 @@ INST_INFO_MAP = {
     "ETH-USDT-SWAP": InstrumentInfo(
         inst_id="ETH-USDT-SWAP", inst_type=InstType.SWAP,
         base_ccy="ETH", quote_ccy="USDT",
-        lot_sz=1.0, min_sz=1.0, ct_val=0.01, tick_sz=0.01,
+        lot_sz=0.01, min_sz=0.01, ct_val=0.1, tick_sz=0.01,
     ),
     "BTC-USDT-SWAP": InstrumentInfo(
         inst_id="BTC-USDT-SWAP", inst_type=InstType.SWAP,
         base_ccy="BTC", quote_ccy="USDT",
-        lot_sz=1.0, min_sz=1.0, ct_val=0.01, tick_sz=0.1,
+        lot_sz=0.01, min_sz=0.01, ct_val=0.01, tick_sz=0.1,
     ),
     "ETH-USDT": InstrumentInfo(
         inst_id="ETH-USDT", inst_type=InstType.SPOT,
@@ -144,6 +144,11 @@ async def run(args: argparse.Namespace) -> None:
         inst_info=inst_info,
         initial_capital=args.capital,
         inst_type=inst_type,
+        max_position_pct=args.max_position_pct,
+    )
+    logger.info(
+        f"单品种名义上限 {engine._max_position_pct:.0%}"
+        f"{'（实盘 RISK__MAX_POSITION_PCT）' if args.max_position_pct is None else '（命令行覆盖）'}"
     )
 
     await engine.run(
@@ -191,6 +196,8 @@ def main() -> None:
     parser.add_argument("--capital",  type=float, default=10_000.0, help="初始资金（USDT）")
     parser.add_argument("--max-bars", type=int,   default=10_000,   help="回测期最多 15m K 线根数")
     parser.add_argument("--out-dir",  default=".",                   help="输出目录（CSV + 图表）")
+    parser.add_argument("--max-position-pct", type=float, default=None,
+                        help="单品种名义上限（默认取实盘 RISK__MAX_POSITION_PCT）")
     parser.add_argument("--no-chart",       action="store_true", help="跳过图表生成")
     parser.add_argument("--force-download", action="store_true", help="忽略缓存，强制重新下载所有数据")
     args = parser.parse_args()

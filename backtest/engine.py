@@ -223,6 +223,19 @@ class BacktestRest:
 
         if is_open:
             pos_side = order.pos_side.value  # "long" / "short"
+            # 反向开仓时 open_position 会隐式平掉原持仓。那一腿的盈亏进了现金，
+            # 却曾经不写进 trades——于是交易记录里只见 open_short 不见 close_short，
+            # 净张数一路累积，所有基于 trades 的统计（胜率、盈亏比、回合）全是错的。
+            held = self._portfolio._position
+            if held and held["pos_side"] != pos_side:
+                closed_qty = held["contracts"]
+                net_pnl, _, closed = self._portfolio.close_position(price, closed_qty)
+                if closed > 0:
+                    self.trades.append(TradeRecord(
+                        ts=ts, action=f"close_{held['pos_side']}", price=price,
+                        contracts=closed, pnl=net_pnl,
+                        reason="反向开仓，先平原持仓",
+                    ))
             self._portfolio.open_position(pos_side, contracts, price)
             action = f"open_{pos_side}"
             self.trades.append(TradeRecord(
@@ -299,13 +312,24 @@ class BacktestEngine:
         inst_info: InstrumentInfo,
         initial_capital: float = 10_000.0,
         inst_type: InstType = InstType.SWAP,
+        max_position_pct: float | None = None,
     ):
         leverage = strategy_config.get("leverage", 1)
         self._portfolio = BacktestPortfolio(initial_capital, inst_info.ct_val, leverage)
         self._rest = BacktestRest(self._portfolio, inst_info)
         self._db = BacktestDB()
+        # 单品种名义上限默认取实盘那一份（RISK__MAX_POSITION_PCT）。这里曾硬编码
+        # 成 1.0「回测不做风控拦截」，结果回测按满仓成交、实盘按 25% 截断，
+        # 同一策略跑出的收益差了一个数量级。它不是事后统计口径，而是直接改变
+        # 每一单的成交量，必须和实盘同源。
+        if max_position_pct is None:
+            from config.settings import RiskConfig
+            max_position_pct = RiskConfig().max_position_pct
+        self._max_position_pct = max_position_pct
         self._risk = RiskManager(
-            max_position_pct=1.0,   # 回测不做风控拦截
+            max_position_pct=max_position_pct,
+            # 日亏/回撤熔断是「暂停策略等人工介入」的运维动作，不是下单量约束，
+            # 在回测里放开——否则一次熔断会把后面几年的样本全部抹掉。
             max_daily_loss_pct=1.0,
             max_drawdown_pct=1.0,
             order_rate_limit=9999,

@@ -199,3 +199,68 @@ async def test_normal_stop_fills_at_stop_price():
 
     sl = [t for t in e.trades if t.action == "sl_long"]
     assert sl[0].price == 1950.0
+
+
+# ── 名义仓位上限与实盘同源 ────────────────────────────────────────────────────
+
+def test_position_cap_defaults_to_live_setting():
+    """回测曾硬编码 1.0，实盘按 RISK__MAX_POSITION_PCT 截断，同一策略差一个数量级"""
+    from config.settings import RiskConfig
+    assert _engine([])._risk.max_position_pct == RiskConfig().max_position_pct
+
+
+def test_position_cap_can_be_overridden():
+    e = BacktestEngine(strategy_cls=_Spy, strategy_name="spy", strategy_config={},
+                       inst_id=INST, inst_info=INFO, max_position_pct=0.75)
+    assert e._risk.max_position_pct == 0.75
+
+
+# ── 反向开仓必须留下平仓记录 ──────────────────────────────────────────────────
+
+async def test_reversal_records_the_implicit_close():
+    """反向开仓会隐式平掉原持仓，这一腿必须出现在 trades 里
+
+    否则交易记录只增不减（只见 open_short 不见 close_short），净张数无限
+    累积，所有基于 trades 的统计——胜率、盈亏比、回合聚合——全部失真。
+    """
+    from gateway.models import Order, OrderSide, OrderType, PosSide
+
+    e = _engine([])
+    rest, port = e._rest, e._portfolio
+    rest.strategy = None   # 只测成交记账，不牵扯策略回调
+    rest.set_current_candle(_bars(1, timedelta(hours=4))[0])
+
+    async def place(side, pos_side, qty, reduce_only=False):
+        await rest.place_order(Order(
+            inst_id=INST, side=side, order_type=OrderType.MARKET, qty=qty,
+            pos_side=pos_side, reduce_only=reduce_only), InstType.SWAP)
+
+    await place(OrderSide.BUY, PosSide.LONG, 10)
+    await place(OrderSide.SELL, PosSide.SHORT, 6)   # 反手
+
+    actions = [t.action for t in rest.trades]
+    assert actions == ["open_long", "close_long", "open_short"]
+    assert port._position["pos_side"] == "short"
+    assert port._position["contracts"] == 6
+
+    net = sum(t.contracts if t.action.startswith("open") else -t.contracts
+              for t in rest.trades)
+    assert net == pytest.approx(6.0), "净张数必须等于当前持仓"
+
+
+# ── 离线兜底规格 ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("inst,ct_val,lot,min_", [
+    ("ETH-USDT-SWAP", 0.1, 0.01, 0.01),
+    ("BTC-USDT-SWAP", 0.01, 0.01, 0.01),
+])
+def test_offline_fallback_matches_exchange(inst, ct_val, lot, min_):
+    """兜底表的值错了，回测会安静地跑出错的仓位
+
+    fetch_instrument_info 失败时只打一条 WARNING 就退回这张表。ETH 的 ctVal
+    曾写成 0.01（真值 0.1，差 10 倍）——单位张数因此差一个数量级，而回测照常
+    出报告，看不出任何异常。
+    """
+    from backtest.run_backtest import INST_INFO_MAP
+    info = INST_INFO_MAP[inst]
+    assert (info.ct_val, info.lot_sz, info.min_sz) == (ct_val, lot, min_)
