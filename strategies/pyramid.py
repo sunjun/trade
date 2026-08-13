@@ -291,7 +291,7 @@ class PyramidStrategy(BaseStrategy):
 
         stop_price = self._invalidation_price()
         entries = self._planned_entries(first_price)
-        equity = self._portfolio.get_total_equity()
+        equity = self.strategy_equity()
         budget = equity * self._risk_pct
 
         qty = plan_ladder(self._weights, entries, stop_price, budget, info.ct_val)

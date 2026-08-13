@@ -28,6 +28,8 @@ PyramidStrategy 的风险预算反推同源。加满 max_units 个单位后的�
   timeframe          执行时框，默认 4H
   entry_period       入场通道周期（关键点回看根数），默认 20
   exit_period        出场通道周期，必须 < entry_period，默认 10
+                     周期太短会退化成噪声突破：ETH 4H 上 8~10 根 PF 只有 1.00，
+                     15 根才转正，20~55 根是一整片有效区间。
   atr_period         ATR 周期，默认 20
   unit_risk_pct      单个单位的风险占权益比例，默认 0.005
   max_units          最多加到几个单位，默认 4
@@ -36,6 +38,9 @@ PyramidStrategy 的风险预算反推同源。加满 max_units 个单位后的�
   unit_ratio         各单位张数的递减系数（1.0=等量，海龟原版；<1 = 越晚越轻），默认 1.0
   allow_short        是否做空（仅合约），默认 true
   cooldown_candles   平仓后冷却根数，默认 1
+
+仓位基数取 self.strategy_equity()（账户权益 × equity_pct，再受 max_equity 封顶），
+不是账户全额——见 BaseStrategy。
 """
 from typing import TYPE_CHECKING
 
@@ -287,7 +292,7 @@ class LivermoreStrategy(BaseStrategy):
 
         atr = self._atr.value
         info = await self._rest.get_instrument(self.symbol, self.inst_type)
-        equity = self._portfolio.get_total_equity()
+        equity = self.strategy_equity()
         unit_qty = self._unit_size(equity, atr, info.ct_val)
         if round_qty(unit_qty, info.lot_sz, info.min_sz) <= 0:
             self._note = (

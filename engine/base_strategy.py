@@ -75,6 +75,20 @@ class BaseStrategy(ABC):
         # 查自己的仓位时必须带上它，否则会读到手动仓或别的策略的仓位。
         self.td_mode = config.get("td_mode", "cross") if inst_type == InstType.SWAP else ""
 
+        # ── 本策略可动用的资金 ────────────────────────────────────────────────
+        # 所有策略共用一个 Portfolio，权益是整个账户的。不分配的话，同时启用 N 个
+        # 策略时每个都按全部权益算仓位，实际风险叠加成 N 倍——各自看着都合规，
+        # 合起来超额。equity_pct 就是这个分配比例。
+        self.equity_pct = float(config.get("equity_pct", 1.0))
+        if not 0.0 < self.equity_pct <= 1.0:
+            raise ValueError(
+                f"[{name}] equity_pct={self.equity_pct} 必须在 (0, 1] 之间"
+            )
+        max_equity = config.get("max_equity")
+        self.max_equity = float(max_equity) if max_equity is not None else None
+        if self.max_equity is not None and self.max_equity <= 0:
+            raise ValueError(f"[{name}] max_equity={self.max_equity} 必须为正数")
+
         self.client_tag = make_client_tag(name)  # clOrdId 前缀，用于回推订单归属
         self._order_seq = 0
         # 未收盘K线心跳的节流：策略只在收线那一刻才判断要不要交易，
@@ -83,6 +97,19 @@ class BaseStrategy(ABC):
         self._tick_log_interval = (
             timeframe_seconds(str(config.get("timeframe", ""))) or DEFAULT_TICK_LOG_INTERVAL
         )
+
+    # ── 资金 ───────────────────────────────────────────────────────────────────
+
+    def strategy_equity(self) -> float:
+        """本策略算仓位时该用的权益 —— 账户权益 × equity_pct，再受 max_equity 封顶。
+
+        策略一律用这个，不要直接用 portfolio.get_total_equity()：后者是整个账户的，
+        多策略并行时会各自按全额算仓位。
+        """
+        equity = self._portfolio.get_total_equity() * self.equity_pct
+        if self.max_equity is not None:
+            equity = min(equity, self.max_equity)
+        return max(0.0, equity)
 
     # ── 子类实现 ───────────────────────────────────────────────────────────────
 
@@ -271,11 +298,17 @@ class BaseStrategy(ABC):
                 )
         if qty <= 0:
             avail = self._portfolio.get_available("USDT")
-            equity = self._portfolio.get_total_equity()
+            equity = self.strategy_equity()
+            account = self._portfolio.get_total_equity()
+            share = "" if self.equity_pct >= 1.0 and self.max_equity is None else (
+                f"（账户 {account:.2f} 的 {self.equity_pct:.0%}"
+                + (f"，封顶 {self.max_equity:.2f}" if self.max_equity is not None else "")
+                + "）"
+            )
             info = await self._rest.get_instrument(signal.inst_id, self.inst_type)
             logger.warning(
                 f"[{self.name}] 信号被跳过：可下张数为 0（策略算出 {raw_qty}，闸门后 {qty}）"
-                f"｜可用 {avail:.2f} / 权益 {equity:.2f} USDT"
+                f"｜可用 {avail:.2f} / 本策略额度 {equity:.2f} USDT{share}"
                 f"｜交易所最小下单量 minSz={info.min_sz} lotSz={info.lot_sz}"
                 f"｜常见原因：资金不足、算出的量低于 minSz、"
                 f"或已达 max_position_pct({self._risk.max_position_pct:.0%}) 名义上限"
@@ -332,7 +365,9 @@ class BaseStrategy(ABC):
         """
         if qty <= 0:
             return qty
-        equity = self._portfolio.get_total_equity()
+        # 按本策略的资金额度算，不是整个账户——否则分了 equity_pct 的策略
+        # 仍然能占到全账户 25% 的名义，分配就形同虚设
+        equity = self.strategy_equity()
         if equity <= 0:
             return qty
 
