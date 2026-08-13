@@ -248,6 +248,39 @@ strategies:
       position_size_pct: 0.15
       cooldown_candles: 2
 
+  # ── 利弗摩尔式突破加码（反马丁格尔）──────────────────────────────────────
+  # 与 PyramidStrategy 方向相反：向盈利加码，最大仓位出现在判断已被验证的时刻。
+  # 收益分布也相反——胜率低、右尾厚，靠少数几笔大趋势覆盖大量小亏。
+  - name: eth_livermore_swap
+    class: LivermoreStrategy
+    enabled: false
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "4H"
+      entry_period: 20       # 关键点：突破前 20 根 4H 极值
+      exit_period: 10
+      atr_period: 20
+      unit_risk_pct: 0.005   # 每个单位触及自身初始止损时亏 0.5% 权益
+      max_units: 4
+      add_atr_step: 1.0      # 每朝有利方向走 1N 加一个单位（0.5N 在所有闸门档位都更差）
+      # stop_atr_mult 与账户级 RISK__MAX_POSITION_PCT 强耦合：止损越紧，单位名义越大、
+      # 越容易被闸门截断。ETH 5 年回测（年化，已扣 taker 费、未扣资金费约 1%）：
+      #   闸门 0.25 → 2N: +0.81%  3N: +1.78%  4N: +3.19%（拉远止损才能不被截断）
+      #   闸门 0.75 → 2N: +9.42%  3N: +6.94%  4N: +5.89%（不截断时紧止损明显更优）
+      # 当前 0.25 闸门下 4N 是唯一前后半样本皆正的组合。
+      stop_atr_mult: 4.0     # 止损距最新成交价 4N，每次加码后一并上移
+      unit_ratio: 1.0        # 1.0=等量（海龟原版）；<1 = 越晚越轻（利弗摩尔原味）
+      # 做空逻辑完整可用（下破通道开空、每跌一档加码、止损下移），但不值得开：
+      # ETH 空头腿 5 年 +623.90 USDT、BTC −337.66 USDT，方向不一致；而两个品种
+      # 上开空都让回撤变大（ETH −10.73%→−12.06%）、盈亏比变小（1.37→1.26），
+      # 且 ETH 只有仅多能通过前后半样本外检验。
+      allow_short: false
+      cooldown_candles: 1
+      leverage: 3
+      td_mode: cross
+      on_existing_position: ignore
+
   # ── 网格策略（振荡区间）───────────────────────────────────────────────
   - name: btc_grid_spot
     class: GridStrategy
