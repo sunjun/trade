@@ -18,11 +18,17 @@ def _setup_logging():
     os.environ["TZ"] = "Asia/Shanghai"
     time.tzset()
 
+    # diagnose=False 是必须的，不是调优。loguru 默认在异常回溯里渲染每个变量的
+    # **值**，而 okx_rest._headers() 那一帧里就摆着 self._secret_key 和
+    # self._passphrase——任何一次签名路径上的异常都会把实盘密钥明文写进
+    # logs/ 下保留 30 天的文件。backtrace 保留：要的是调用链，不是变量值。
     logger.remove()
     logger.add(
         sys.stderr,
         level=settings.log_level,
         format="<green>{time:MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
+        backtrace=True,
+        diagnose=False,
     )
     logger.add(
         "logs/trade_{time:YYYY-MM-DD}.log",
@@ -30,6 +36,8 @@ def _setup_logging():
         rotation="00:00",
         retention="30 days",
         compression="gz",
+        backtrace=True,
+        diagnose=False,
     )
 
 
