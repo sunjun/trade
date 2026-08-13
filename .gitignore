@@ -50,6 +50,7 @@ backtest_results/
 backtest_cache/
 *.csv
 *chart.png
+*_report.html
 cache/
 
 # Claude UI

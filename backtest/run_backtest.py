@@ -8,7 +8,13 @@
     --capital    初始资金 USDT（默认 10000）
     --max-bars   最多拉取 15m K 线根数（默认 10000，约 3 个月）
     --out-dir    输出目录（默认当前目录）
-    --no-chart   跳过绘图（仅输出统计和 CSV）
+    --no-chart   跳过 PNG 绘图
+    --no-html    跳过可交互 HTML 报告
+
+产物：
+    backtest_<策略>_trades.csv     逐笔记录
+    backtest_<策略>_chart.png      静态总览
+    backtest_<策略>_report.html    可交互报告（买卖点 / 盈亏 / 开仓理由，浏览器直接打开）
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from backtest.data_loader import fetch_all_candles, fetch_instrument_info
 from backtest.engine import BacktestEngine
+from backtest.html_report import export_html_report
 from backtest.report import _calc_metrics, export_trades_csv, plot_results, print_report
 from gateway.models import InstrumentInfo, InstType
 
@@ -176,8 +183,8 @@ async def run(args: argparse.Namespace) -> None:
     export_trades_csv(engine.trades, csv_path)
 
     # ── 图表 ──────────────────────────────────────────────────────────────────
+    bt_candles = candles_primary[warm_primary:]
     if not args.no_chart:
-        bt_candles = candles_primary[warm_primary:]
         chart_path = str(out_dir / f"backtest_{args.strategy}_chart.png")
         plot_results(
             candles=bt_candles,
@@ -186,6 +193,19 @@ async def run(args: argparse.Namespace) -> None:
             equity_ts=engine.equity_timestamps,
             strategy_name=args.strategy,
             output_path=chart_path,
+        )
+
+    # ── 可交互 HTML 报告 ──────────────────────────────────────────────────────
+    if not args.no_html:
+        export_html_report(
+            candles=bt_candles,
+            trades=engine.trades,
+            equity_curve=engine.equity_curve,
+            equity_ts=engine.equity_timestamps,
+            strategy_name=args.strategy,
+            initial_capital=engine.initial_capital,
+            metrics=metrics,
+            output_path=str(out_dir / f"backtest_{args.strategy}_report.html"),
         )
 
 
@@ -198,7 +218,8 @@ def main() -> None:
     parser.add_argument("--out-dir",  default=".",                   help="输出目录（CSV + 图表）")
     parser.add_argument("--max-position-pct", type=float, default=None,
                         help="单品种名义上限（默认取实盘 RISK__MAX_POSITION_PCT）")
-    parser.add_argument("--no-chart",       action="store_true", help="跳过图表生成")
+    parser.add_argument("--no-chart",       action="store_true", help="跳过 PNG 图表生成")
+    parser.add_argument("--no-html",        action="store_true", help="跳过可交互 HTML 报告")
     parser.add_argument("--force-download", action="store_true", help="忽略缓存，强制重新下载所有数据")
     args = parser.parse_args()
 
