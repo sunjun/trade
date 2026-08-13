@@ -262,24 +262,39 @@ strategies:
     inst_type: SWAP
     symbol: ETH-USDT-SWAP
     config:
+      # 时框不是随便选的，也不是最优的——是唯一「有效且样本够」的那一档。
+      # ETH 5 年仅多、闸门 25%：1H 噪声主导（PF 1.10、回撤 −15%），日线看着最好
+      # （+36%、PF 5.41）但只有 29 个回合，其中 71.7% 净利来自单独一笔，去掉它
+      # 只剩 +1026 USDT。4H 有 112 个回合，最大一笔占 41.3%，去掉后仍有 +2160。
+      # 注意 2H/20 是负的（−0.45%）而两侧都为正，时框方向并不是平滑响应，
+      # 换时框必须重测，不能按「时长等价」直接换算周期数。
       timeframe: "4H"
-      entry_period: 20       # 关键点：突破前 20 根 4H 极值
-      exit_period: 10
+      # 通道周期是一片平台不是一个尖峰：ETH 5 年仅多、闸门 25% 下，
+      # 8/10 根直接失效（PF 1.00），15 根转正，20~55 根全部通过前后半样本外
+      # 检验（PF 1.37~1.76）。20 落在平台下沿，往里挪一档留安全边际——
+      # 取 30 不是因为它跑分最高（那是噪声），是因为它离失效区最远。
+      entry_period: 30       # 关键点：突破前 30 根 4H（约 5 天）极值
+      exit_period: 15
       atr_period: 20
       unit_risk_pct: 0.005   # 每个单位触及自身初始止损时亏 0.5% 权益
       max_units: 4
       add_atr_step: 1.0      # 每朝有利方向走 1N 加一个单位（0.5N 在所有闸门档位都更差）
-      # stop_atr_mult 与账户级 RISK__MAX_POSITION_PCT 强耦合：止损越紧，单位名义越大、
-      # 越容易被闸门截断。ETH 5 年回测（年化，已扣 taker 费、未扣资金费约 1%）：
-      #   闸门 0.25 → 2N: +0.81%  3N: +1.78%  4N: +3.19%（拉远止损才能不被截断）
-      #   闸门 0.75 → 2N: +9.42%  3N: +6.94%  4N: +5.89%（不截断时紧止损明显更优）
-      # 当前 0.25 闸门下 4N 是唯一前后半样本皆正的组合。
+      # stop_atr_mult 与账户级 RISK__MAX_POSITION_PCT 强耦合：止损越紧，单位名义
+      # 越大、越容易被闸门截断。ETH 5 年、30/15、仅多（年化，已扣 taker 费、
+      # 未扣资金费约 1%）：
+      #   闸门 0.25 → 2N: +2.81%✗  3N: +5.22%✓  4N: +5.03%✓
+      #   闸门 0.75 → 2N: +12.78%✓ 3N: +10.71%✓ 4N: +9.37%✓
+      #   （✓ = 前后半样本外皆正）
+      # 闸门收紧时紧止损被截断得最狠，放开时反而最优——两条曲线是交叉的，
+      # 所以改 RISK__MAX_POSITION_PCT 必须连带重选 stop_atr_mult。
+      # 当前 0.25 闸门下 3N/4N 打平（回撤同为 −8.02%），取 4N 因其 PF 略高
+      # 且离 2N 那个失效区更远。
       stop_atr_mult: 4.0     # 止损距最新成交价 4N，每次加码后一并上移
       unit_ratio: 1.0        # 1.0=等量（海龟原版）；<1 = 越晚越轻（利弗摩尔原味）
-      # 做空逻辑完整可用（下破通道开空、每跌一档加码、止损下移），但不值得开：
-      # ETH 空头腿 5 年 +623.90 USDT、BTC −337.66 USDT，方向不一致；而两个品种
-      # 上开空都让回撤变大（ETH −10.73%→−12.06%）、盈亏比变小（1.37→1.26），
-      # 且 ETH 只有仅多能通过前后半样本外检验。
+      # 做空逻辑完整可用（下破通道开空、每跌一档加码、止损下移），但不值得开。
+      # ETH 5 年、30/15、闸门 25%：仅多 +27.60%/回撤 −8.03%/PF 1.69，
+      # 多+空 +27.99%/回撤 −8.50%/PF 1.38 —— 多做一倍的交易换来 +0.39pp 收益，
+      # 却把盈亏比压低了。对照条目 eth_livermore_ls_swap 可随时复跑。
       allow_short: false
       cooldown_candles: 1
       leverage: 3
@@ -287,6 +302,30 @@ strategies:
       on_existing_position: ignore
       equity_pct: 1.0        # 本策略可动用账户权益的比例（见文件头）
       # max_equity: 2000     # 可选：绝对上限 USDT。与 equity_pct 同时给时取更紧的那个
+
+  # 同上，但多空都做——仅用于对照回测，不上实盘
+  - name: eth_livermore_ls_swap
+    class: LivermoreStrategy
+    enabled: true
+    inst_type: SWAP
+    symbol: ETH-USDT-SWAP
+    config:
+      timeframe: "4H"
+      entry_period: 30       # 与 eth_livermore_swap 保持一致，只差 allow_short
+      exit_period: 15
+      atr_period: 20
+      unit_risk_pct: 0.005
+      max_units: 4
+      add_atr_step: 1.0
+      stop_atr_mult: 4.0
+      unit_ratio: 1.0
+      allow_short: true
+      cooldown_candles: 1
+      leverage: 3
+      td_mode: cross
+      on_existing_position: ignore
+      equity_pct: 1.0        # 本策略可动用账户权益的比例（见文件头）
+      max_equity: 400     # 可选：绝对上限 USDT。与 equity_pct 同时给时取更紧的那个
 
   # ── 网格策略（振荡区间）───────────────────────────────────────────────
   - name: btc_grid_spot
@@ -389,7 +428,7 @@ strategies:
 
   - name: eth_pyramid_swap
     class: PyramidStrategy
-    enabled: true
+    enabled: false
     inst_type: SWAP
     symbol: ETH-USDT-SWAP
     config:
